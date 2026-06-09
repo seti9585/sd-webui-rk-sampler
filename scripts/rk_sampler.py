@@ -1,25 +1,25 @@
 """
-RK Sampler — reForge 拡張機能
+RK Sampler — reForge Extension
 ==============================
-配置場所: extensions/rk-sampler/scripts/rk_sampler.py
+Location: extensions/rk-sampler/scripts/rk_sampler.py
 
-ComfyUI-RK-Sampler (https://github.com/memmaptensor/ComfyUI-RK-Sampler) の
-全 ODE メソッドを reForge に移植した独立サンプラー拡張。
+Port of all ODE methods from ComfyUI-RK-Sampler
+(https://github.com/memmaptensor/ComfyUI-RK-Sampler) as an independent sampler extension.
 
-【特徴】
-- 19 種のメソッドを個別のサンプラーとして登録
+[Features]
+- Registers 19 methods as individual samplers
   (ae_bosh3, ae_cash_karp5, ae_dopri5, ae_dopri8,
    ae_fehlberg2, ae_fehlberg5, ae_heun_euler2, ae_midpoint2,
    ae_ralston2, ae_tsit5,
    fe_euler1, fe_heun3, fe_kutta3, fe_kutta4, fe_kutta_38th4,
    fe_ralston3, fe_ralston4, fe_ssprk3, fe_wray3)
-- txt2img と hires.fix で別メソッドを選択可能
-  → reForge の Custom ODE Settings は 1 つしか選べないため
-- 適応ステップ (ae_*): PID コントローラーで自動刻み幅調整
-- 固定ステップ (fe_*): sigma スケジュールに従って固定刻み幅
-- Settings タブで rtol / atol / max_steps をサンプラーごとに設定可能
+- Different methods can be selected for txt2img and hires.fix
+  (reForge's Custom ODE Settings only allows one choice)
+- Adaptive step (ae_*): automatic step size adjustment via PID controller
+- Fixed step (fe_*): fixed step size following the sigma schedule
+- rtol / atol / max_steps configurable per sampler in the Settings tab
 
-依存:
+Dependencies:
   torchode  (pip install torchode)
 """
 
@@ -34,14 +34,14 @@ import torch
 from tqdm.auto import tqdm
 
 # ---------------------------------------------------------------------------
-# rk_core パッケージを scripts の親ディレクトリから探す
+# Search for rk_core package in the parent directory of scripts
 # ---------------------------------------------------------------------------
 _EXT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _EXT_DIR not in sys.path:
     sys.path.insert(0, _EXT_DIR)
 
 # ---------------------------------------------------------------------------
-# reForge コアモジュール
+# reForge core modules
 # ---------------------------------------------------------------------------
 from modules import sd_samplers_common, shared, script_callbacks
 from modules.shared import opts
@@ -49,7 +49,7 @@ from modules.shared import opts
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# torchode チェック
+# torchode availability check
 # ---------------------------------------------------------------------------
 try:
     import torchode
@@ -57,7 +57,7 @@ try:
 except ModuleNotFoundError:
     HAS_TORCHODE = False
     logger.error(
-        "[RK Sampler] torchode が見つかりません。pip install torchode を実行してください。"
+        "[RK Sampler] torchode not found. Please run: pip install torchode"
     )
 
 HAS_MPS = torch.backends.mps.is_available()
@@ -69,7 +69,7 @@ except ModuleNotFoundError:
 
 
 # ===========================================================================
-# Section 0: メソッド定義と登録テーブル
+# Section 0: Method Definitions and Registration Table
 # ===========================================================================
 
 ADAPTIVE_METHODS = {
@@ -97,7 +97,7 @@ FIXED_METHODS = {
     "fe_wray3":       ("rk_core.methods.fe_wray3",      "FEWray3"),
 }
 
-# scipy ベースの適応ステップメソッド（バッチを1枚ずつ処理）
+# scipy-based adaptive step methods (process one sample at a time)
 SCIPY_METHODS = {
     "se_RK23":   {"order": 3,  "nfe_per_step": 3},
     "se_RK45":   {"order": 5,  "nfe_per_step": 6},
@@ -106,16 +106,16 @@ SCIPY_METHODS = {
 
 ALL_METHODS = {**ADAPTIVE_METHODS, **FIXED_METHODS, **SCIPY_METHODS}
 
-# opts キー
-OPT_LOG_RTOL  = "rk_sampler_log_rtol"    # 適応ステップ用 relative tolerance
-OPT_LOG_ATOL  = "rk_sampler_log_atol"    # 適応ステップ用 absolute tolerance
-OPT_MAX_STEPS = "rk_sampler_max_steps"   # 適応ステップ上限
-OPT_MIN_SIGMA = "rk_sampler_min_sigma"   # sigma の打ち切り下限
-OPT_PCOEFF    = "rk_sampler_pcoeff"      # PID P 係数
-OPT_ICOEFF    = "rk_sampler_icoeff"      # PID I 係数
-OPT_DCOEFF    = "rk_sampler_dcoeff"      # PID D 係数
+# Options keys
+OPT_LOG_RTOL  = "rk_sampler_log_rtol"    # relative tolerance for adaptive steps
+OPT_LOG_ATOL  = "rk_sampler_log_atol"    # absolute tolerance for adaptive steps
+OPT_MAX_STEPS = "rk_sampler_max_steps"   # max steps for adaptive methods
+OPT_MIN_SIGMA = "rk_sampler_min_sigma"   # lower cutoff for sigma
+OPT_PCOEFF    = "rk_sampler_pcoeff"      # PID P coefficient
+OPT_ICOEFF    = "rk_sampler_icoeff"      # PID I coefficient
+OPT_DCOEFF    = "rk_sampler_dcoeff"      # PID D coefficient
 
-# デフォルト値
+# Default values
 DEF_LOG_RTOL  = -3.0
 DEF_LOG_ATOL  = -4.0
 DEF_MAX_STEPS = 1000
@@ -130,11 +130,11 @@ def _get(key, default):
 
 
 # ===========================================================================
-# Section 1: メソッドクラスの動的ロード
+# Section 1: Dynamic Method Class Loading
 # ===========================================================================
 
 def _load_method_class(method_name: str):
-    """メソッド名からクラスを動的にインポートして返す。scipy メソッドは None を返す。"""
+    """Dynamically import and return the class for a given method name. Returns None for scipy methods."""
     if method_name in SCIPY_METHODS:
         return None
     import importlib
@@ -144,7 +144,7 @@ def _load_method_class(method_name: str):
 
 
 # ===========================================================================
-# Section 2: コアサンプリング関数
+# Section 2: Core Sampling Functions
 # ===========================================================================
 
 def _run_rk_sampler(
@@ -162,7 +162,7 @@ def _run_rk_sampler(
     icoeff: float    = DEF_ICOEFF,
     dcoeff: float    = DEF_DCOEFF,
 ):
-    """メソッドに応じて torchode 版または scipy 版にディスパッチする。"""
+    """Dispatch to torchode or scipy implementation depending on the method."""
     if method_name in SCIPY_METHODS:
         return _run_scipy_sampler(
             method_name=method_name, model=model, x=x, sigmas=sigmas,
@@ -191,9 +191,9 @@ def _run_scipy_sampler(
     min_sigma: float = DEF_MIN_SIGMA,
 ):
     """
-    scipy.integrate.solve_ivp を使った適応ステップサンプラー。
-    バッチを1枚ずつ処理する。
-    ComfyUI-RK-Sampler の RungeKuttaSamplerImpl._call_scipy() に相当。
+    Adaptive step sampler using scipy.integrate.solve_ivp.
+    Processes one sample at a time.
+    Equivalent to ComfyUI-RK-Sampler's RungeKuttaSamplerImpl._call_scipy().
     """
     import scipy.integrate
     import scipy.integrate._ivp.rk
@@ -245,7 +245,7 @@ def _run_scipy_sampler(
                 c_dtype    = c_dtype,
             )
 
-            # ComfyUI-RK-Sampler と同じ方法で scipy の内部を差し替える
+            # Replace scipy internals in the same way as ComfyUI-RK-Sampler
             scipy.integrate._ivp.rk.RungeKutta._step_impl = scipy_step_impl._step_impl
             scipy_step_impl.DT_MIN    = None
             scipy_step_impl.DT_MAX    = None
@@ -268,7 +268,7 @@ def _run_scipy_sampler(
                     rtol        = 10 ** log_rtol,
                 )
             except sd_samplers_common.InterruptedException:
-                logger.debug("[RK Sampler] scipy 中断されました（InterruptedException）")
+                logger.debug("[RK Sampler] scipy interrupted (InterruptedException)")
                 sample = torch.from_numpy(x_np[i].reshape(o_shape_1)).to(o_device, dtype=o_dtype)
                 samples.append(sample)
                 break
@@ -284,7 +284,7 @@ def _run_scipy_sampler(
 
         samples.append(sample)
 
-    # 中断時にバッチが足りない場合を補完
+    # Fill incomplete batch on interruption
     while len(samples) < batch:
         samples.append(torch.full(o_shape_1, float("nan"), device=o_device, dtype=o_dtype))
 
@@ -307,8 +307,8 @@ def _run_torchode_sampler(
     dcoeff: float    = DEF_DCOEFF,
 ):
     """
-    torchode の AutoDiffAdjoint を使って ODE を解く。
-    ComfyUI-RK-Sampler の RungeKuttaSamplerImpl._call_torchode() に相当。
+    Solve the ODE using torchode's AutoDiffAdjoint.
+    Equivalent to ComfyUI-RK-Sampler's RungeKuttaSamplerImpl._call_torchode().
     """
     from rk_core.ode_term import ReForgeODETerm
     from rk_core.solvers.auto_diff_adjoint import AutoDiffAdjoint
@@ -316,7 +316,7 @@ def _run_torchode_sampler(
     from rk_core.controllers.scheduled_controller import ScheduledController
 
     is_adaptive = method_name in ADAPTIVE_METHODS
-    # デバイス・dtype 設定
+    # Device and dtype setup
     c_device = "mps" if HAS_MPS else "cpu"
     c_dtype  = torch.float32 if (HAS_MPS or HAS_DML) else torch.float64
     o_device = x.device
@@ -331,7 +331,7 @@ def _run_torchode_sampler(
     t_min = sigmas_c.min().item()
     n_steps = len(sigmas_c) - 1
 
-    # プログレスバー
+    # Progress bar
     if is_adaptive:
         pbar = tqdm(
             total=100,
@@ -366,11 +366,11 @@ def _run_torchode_sampler(
             callback   = callback,
             pbar       = pbar,
             is_adaptive= is_adaptive,
-            cfg_denoiser = model,   # step カウンタ更新のため渡す
+            cfg_denoiser = model,   # passed to update step counter
         )
         term = torchode.ODETerm(ode_fn)
 
-        # ステップサイズコントローラー
+        # Step size controller
         if is_adaptive:
             controller = PIDController(
                 atol       = 10 ** log_atol,
@@ -384,11 +384,11 @@ def _run_torchode_sampler(
         else:
             controller = ScheduledController(sigmas=sigmas_c)
 
-        # メソッドクラスのインスタンス化
+        # Instantiate method class
         MethodClass = _load_method_class(method_name)
         step_method = MethodClass(term=term)
 
-        # ソルバー
+        # Solver
         adjoint = AutoDiffAdjoint(
             step_method,
             controller,
@@ -397,7 +397,7 @@ def _run_torchode_sampler(
             dense_output                     = False,
         )
 
-        # 問題設定: t_start=sigma_max → t_end=sigma_min
+        # Problem setup: t_start=sigma_max → t_end=sigma_min
         problem = torchode.InitialValueProblem(
             y0      = x_c.flatten(start_dim=1),
             t_start = torch.full((batch,), t_max, device=c_device, dtype=c_dtype),
@@ -408,13 +408,13 @@ def _run_torchode_sampler(
         try:
             result = adjoint.solve(problem)
         except sd_samplers_common.InterruptedException:
-            # ユーザーによる中断（Skip/Interrupt）— x をそのまま返して正常終了
-            logger.debug("[RK Sampler] 中断されました（InterruptedException）")
+            # User interruption (Skip/Interrupt) — return x as-is
+            logger.debug("[RK Sampler] Interrupted (InterruptedException)")
             return x.to(o_device, dtype=o_dtype)
 
     samples = result.ys[:, -1].reshape(o_shape).to(o_device, dtype=o_dtype)
 
-    # エラーチェック
+    # Error check
     for i, status in enumerate(result.status):
         s = status.item()
         if s != 0:
@@ -426,18 +426,18 @@ def _run_torchode_sampler(
 
 
 # ===========================================================================
-# Section 3: reForge Sampler ラッパークラス（全メソッド共通）
+# Section 3: reForge Sampler Wrapper Class (shared by all methods)
 # ===========================================================================
 
 class RKMethodSampler(sd_samplers_common.Sampler):
     """
-    1つの RK メソッドに対応する reForge サンプラー。
-    _register() で全メソッド分のインスタンスが作られる。
+    reForge sampler for a single RK method.
+    One instance per method is created in _register().
     """
 
     def __init__(self, sd_model, method_name: str):
-        # 固定ステップの fe_ はサンプラーとして sample_fn が必要なので
-        # ダミーの callable を渡す（実際は _run_rk_sampler を使う）
+        # fe_* fixed-step methods require a sample_fn as sampler,
+        # so pass a dummy callable (actual work is done by _run_rk_sampler)
         super().__init__(lambda *a, **k: None)
         self.funcname     = f"rk_{method_name}"
         self.method_name  = method_name
@@ -453,13 +453,13 @@ class RKMethodSampler(sd_samplers_common.Sampler):
         self.model_wrap_cfg.mask            = getattr(p, "mask",  None)
         self.model_wrap_cfg.nmask           = getattr(p, "nmask", None)
         self.model_wrap_cfg.step            = 0
-        self.model_wrap_cfg.total_steps     = p.steps   # apply_refiner() が step/total_steps を計算するため必須
-        self.model_wrap_cfg.steps           = p.steps   # detail_daemon 等が // 演算するため必須
+        self.model_wrap_cfg.total_steps     = p.steps   # required for apply_refiner() to compute step/total_steps
+        self.model_wrap_cfg.steps           = p.steps   # required for detail_daemon etc. that use // operator
         self.model_wrap_cfg.image_cfg_scale = getattr(p, "image_cfg_scale", None)
         self.eta          = p.eta if p.eta is not None else 0.0
         self.s_min_uncond = getattr(p, "s_min_uncond", 0.0)
 
-        # TorchHijack（乱数再現性）
+        # TorchHijack (random seed reproducibility)
         try:
             from modules.sd_samplers_common import TorchHijack
             hijack = TorchHijack(p)
@@ -501,7 +501,7 @@ class RKMethodSampler(sd_samplers_common.Sampler):
         m_sigma_max = self.model_wrap.sigmas[-1].item()
         sigma_min, sigma_max = (
             (0.1, 10)
-            if opts.use_old_karras_scheduler_sigmas
+            if getattr(opts, 'use_old_karras_scheduler_sigmas', False)
             else (m_sigma_min, m_sigma_max)
         )
 
@@ -539,7 +539,7 @@ class RKMethodSampler(sd_samplers_common.Sampler):
         return sigmas.cpu()
 
     def _run(self, p, x, sigmas, n_steps):
-        """Script UI の値があればそちらを優先、なければ Settings タブの値を使う。"""
+        """Use Script UI values if available, otherwise fall back to Settings tab values."""
         log_rtol  = getattr(p, "_rk_log_rtol",  _get(OPT_LOG_RTOL,  DEF_LOG_RTOL))
         log_atol  = getattr(p, "_rk_log_atol",  _get(OPT_LOG_ATOL,  DEF_LOG_ATOL))
         max_steps = int(getattr(p, "_rk_max_steps", _get(OPT_MAX_STEPS, DEF_MAX_STEPS)))
@@ -548,7 +548,7 @@ class RKMethodSampler(sd_samplers_common.Sampler):
         icoeff    = getattr(p, "_rk_icoeff",    _get(OPT_ICOEFF,    DEF_ICOEFF))
         dcoeff    = getattr(p, "_rk_dcoeff",    _get(OPT_DCOEFF,    DEF_DCOEFF))
 
-        # infotext に記録
+        # Record in infotext
         p.extra_generation_params["RK method"]    = self.method_name
         p.extra_generation_params["RK log_rtol"]  = log_rtol
         p.extra_generation_params["RK log_atol"]  = log_atol
@@ -580,7 +580,7 @@ class RKMethodSampler(sd_samplers_common.Sampler):
             getattr(p, "is_hr_pass", "N/A"),
             getattr(p, "_rk_txt2img_method", "NOT SET"),
         )
-        # 「Use reForge sampler」が選ばれている場合は reForge の sampler に委譲
+        # Delegate to reForge sampler when 'Use reForge sampler' is selected
         if getattr(p, "_rk_txt2img_method", "Use same sampler") in ("Use same sampler", "Use reForge sampler"):
             from modules import sd_samplers
             fallback_name = getattr(opts, "sampler_name", None) or "Euler"
@@ -588,20 +588,18 @@ class RKMethodSampler(sd_samplers_common.Sampler):
             return sampler.sample(p, x, conditioning, unconditional_conditioning,
                                   steps=steps, image_conditioning=image_conditioning)
 
-        # 「→ TDE Sampler」が選ばれている場合は TDE Sampler に委譲
+        # Delegate to TDE Sampler when '→ TDE Sampler' is selected
         if getattr(p, "_rk_txt2img_method", "") == "→ TDE Sampler":
             from modules import sd_samplers
             sampler = sd_samplers.create_sampler("TDE Sampler", shared.sd_model)
             return sampler.sample(p, x, conditioning, unconditional_conditioning,
                                   steps=steps, image_conditioning=image_conditioning)
 
-        from modules_forge.forge_sampler import sampling_prepare, sampling_cleanup
+        from backend.sampling.sampling_function import sampling_prepare, sampling_cleanup
 
         unet_patcher = self.model_wrap.inner_model.forge_objects.unet
         sampling_prepare(unet_patcher, x=x)
 
-        self.model_wrap.log_sigmas = self.model_wrap.log_sigmas.to(x.device)
-        self.model_wrap.sigmas     = self.model_wrap.sigmas.to(x.device)
 
         steps  = steps or p.steps
         sigmas = self.get_sigmas(p, steps).to(x.device)
@@ -637,7 +635,7 @@ class RKMethodSampler(sd_samplers_common.Sampler):
             "[RK Sampler] sample_img2img called: is_hr_pass=%s _rk_hr_method=%s",
             getattr(p, "is_hr_pass", "N/A"), hr_method
         )
-        # 「Use same sampler」が選ばれている場合は reForge の sampler に委譲
+        # Delegate to reForge sampler when 'Use same sampler' is selected
         if hr_method in ("Use same sampler", "Use reForge sampler"):
             from modules import sd_samplers
             fallback_name = getattr(opts, "sampler_name", None) or "Euler"
@@ -645,20 +643,18 @@ class RKMethodSampler(sd_samplers_common.Sampler):
             return sampler.sample_img2img(p, x, noise, conditioning, unconditional_conditioning,
                                           steps=steps, image_conditioning=image_conditioning)
 
-        # 「→ TDE Sampler」が選ばれている場合は TDE Sampler に委譲
+        # Delegate to TDE Sampler when '→ TDE Sampler' is selected
         if hr_method == "→ TDE Sampler":
             from modules import sd_samplers
             sampler = sd_samplers.create_sampler("TDE Sampler", shared.sd_model)
             return sampler.sample_img2img(p, x, noise, conditioning, unconditional_conditioning,
                                           steps=steps, image_conditioning=image_conditioning)
 
-        from modules_forge.forge_sampler import sampling_prepare, sampling_cleanup
+        from backend.sampling.sampling_function import sampling_prepare, sampling_cleanup
 
         unet_patcher = self.model_wrap.inner_model.forge_objects.unet
         sampling_prepare(unet_patcher, x=x)
 
-        self.model_wrap.log_sigmas = self.model_wrap.log_sigmas.to(x.device)
-        self.model_wrap.sigmas     = self.model_wrap.sigmas.to(x.device)
 
         steps, t_enc = sd_samplers_common.setup_img2img_steps(p, steps)
         sigmas       = self.get_sigmas(p, steps).to(x.device)
@@ -693,10 +689,10 @@ class RKMethodSampler(sd_samplers_common.Sampler):
 
 
 # ===========================================================================
-# Section 4: Settings タブ UI
+# Section 4: Settings Tab UI
 # ===========================================================================
 
-# --- 拡張設定のデフォルト値（変更したい場合は Settings の「拡張設定」から） ---
+# --- Default values for advanced settings (change via Settings > Advanced Settings) ---
 RK_DEFAULT_MIN_SIGMA = 1e-5
 RK_PID_KP            = 0.0
 RK_PID_KI            = 1.0
@@ -707,14 +703,14 @@ RK_PID_KD            = 0.0
 def _on_ui_settings():
     section = ("rk_sampler", "RK Sampler")
 
-    # --- 通常設定 ---
+    # --- Standard Settings ---
     shared.opts.add_option(OPT_LOG_RTOL, shared.OptionInfo(
         default=DEF_LOG_RTOL,
         label="Log Relative Tolerance (10^x)",
         component=gr.Slider,
         component_args={"minimum": -7.0, "maximum": 0.0, "step": 0.5},
         section=section,
-    ).info("ae_* / se_* メソッドで有効。小さいほど精密・低速。atol 以上に設定してください。"))
+    ).info("Effective for ae_* / se_* methods. Smaller = more precise but slower. Set above atol."))
 
     shared.opts.add_option(OPT_LOG_ATOL, shared.OptionInfo(
         default=DEF_LOG_ATOL,
@@ -722,7 +718,7 @@ def _on_ui_settings():
         component=gr.Slider,
         component_args={"minimum": -7.0, "maximum": 0.0, "step": 0.5},
         section=section,
-    ).info("ae_* / se_* メソッドで有効。小さいほど精密・低速。rtol 以下に設定してください。"))
+    ).info("Effective for ae_* / se_* methods. Smaller = more precise but slower. Set below rtol."))
 
     shared.opts.add_option(OPT_MAX_STEPS, shared.OptionInfo(
         default=DEF_MAX_STEPS,
@@ -730,66 +726,66 @@ def _on_ui_settings():
         component=gr.Slider,
         component_args={"minimum": 10, "maximum": 5000, "step": 10},
         section=section,
-    ).info("ae_* / se_* メソッドで有効。適応ステップが収束しない場合のフェイルセーフ上限。"))
+    ).info("Effective for ae_* / se_* methods. Failsafe upper limit when adaptive steps do not converge."))
 
-    # --- 拡張設定（アコーディオン） ---
+    # --- Advanced Settings (accordion) ---
     shared.opts.add_option(OPT_MIN_SIGMA, shared.OptionInfo(
         default=RK_DEFAULT_MIN_SIGMA,
-        label="[拡張設定] Min Sigma (打ち切り下限)",
+        label="[Advanced] Min Sigma (lower cutoff)",
         component=gr.Slider,
         component_args={"minimum": 0.0, "maximum": 0.1, "step": 1e-5},
         section=section,
         category_id="rk_advanced",
-    ).info("この sigma 以下ではゼロ勾配で通過します。通常は変更不要。"))
+    ).info("Passes with zero gradient below this sigma. Normally no need to change."))
 
     shared.opts.add_option(OPT_PCOEFF, shared.OptionInfo(
         default=RK_PID_KP,
-        label="[拡張設定] PID P 係数 (ae_* のみ有効)",
+        label="[Advanced] PID P Coefficient (ae_* only)",
         component=gr.Slider,
         component_args={"minimum": 0.0, "maximum": 1.0, "step": 0.05},
         section=section,
         category_id="rk_advanced",
-    ).info("通常は変更不要。"))
+    ).info("Normally no need to change."))
 
     shared.opts.add_option(OPT_ICOEFF, shared.OptionInfo(
         default=RK_PID_KI,
-        label="[拡張設定] PID I 係数 (ae_* のみ有効)",
+        label="[Advanced] PID I Coefficient (ae_* only)",
         component=gr.Slider,
         component_args={"minimum": 0.0, "maximum": 2.0, "step": 0.05},
         section=section,
         category_id="rk_advanced",
-    ).info("通常は変更不要。"))
+    ).info("Normally no need to change."))
 
     shared.opts.add_option(OPT_DCOEFF, shared.OptionInfo(
         default=RK_PID_KD,
-        label="[拡張設定] PID D 係数 (ae_* のみ有効)",
+        label="[Advanced] PID D Coefficient (ae_* only)",
         component=gr.Slider,
         component_args={"minimum": 0.0, "maximum": 1.0, "step": 0.05},
         section=section,
         category_id="rk_advanced",
-    ).info("通常は変更不要。"))
+    ).info("Normally no need to change."))
 
 
 script_callbacks.on_ui_settings(_on_ui_settings)
 
 
 # ===========================================================================
-# Section 5: reForge へのサンプラー登録
+# Section 5: Sampler Registration for reForge
 # ===========================================================================
 
 class RKScriptSampler(RKMethodSampler):
     """
-    「RK Sampler」ドロップダウン用サンプラー。
-    実際に使う Method は Script UI から p._rk_txt2img_method / p._rk_hr_method で渡される。
-    どちらも未設定の場合は ae_dopri5 にフォールバック。
+    Sampler for the "RK Sampler" dropdown.
+    The method to use is passed from Script UI via p._rk_txt2img_method / p._rk_hr_method.
+    Falls back to ae_dopri5 if neither is set.
     """
 
     def __init__(self, sd_model):
-        super().__init__(sd_model, "ae_dopri5")  # デフォルト（後で上書きされる）
+        super().__init__(sd_model, "ae_dopri5")  # default (overwritten later)
         self.funcname = "rk_script_sampler"
 
     def _get_method(self, p) -> str:
-        """hires.fix パスかどうかで使うメソッドを選ぶ。"""
+        """Select method based on whether this is a hires.fix pass."""
         if getattr(p, "is_hr_pass", False):
             return getattr(p, "_rk_hr_method", "Use same sampler")
         else:
@@ -798,7 +794,7 @@ class RKScriptSampler(RKMethodSampler):
     def _run(self, p, x, sigmas, n_steps):
         method = self._get_method(p)
 
-        # 「Use same sampler」が選ばれている場合はここに来ないはずだが念のため
+        # Should not reach here when 'Use same sampler' is selected, but guard just in case
         if method in ("Use same sampler", None):
             raise sd_samplers_common.InterruptedException
 
@@ -839,7 +835,7 @@ def _register():
 
     added = 0
 
-    # 「RK Sampler」— Script UI と連携する統合サンプラー
+    # "RK Sampler" — unified sampler integrated with Script UI
     rk_script_data = sd_samplers_common.SamplerData(
         name        = "RK Sampler",
         constructor = lambda sd_model: RKScriptSampler(sd_model),
@@ -854,12 +850,12 @@ def _register():
     sd_samplers.set_samplers()
     if added > 0:
         logger.warning(
-            "[RK Sampler] %d サンプラーを登録しました (torchode=%s)",
+            "[RK Sampler] Registered %d sampler(s) (torchode=%s)",
             added, HAS_TORCHODE
         )
 
 
-# モデルロード後にも再登録（チェックポイント切り替えで all_samplers_map がリセットされる場合の対策）
+# Re-register after model load (handles all_samplers_map reset on checkpoint switch)
 def _on_model_loaded(sd_model):
     try:
         _register()
@@ -868,7 +864,7 @@ def _on_model_loaded(sd_model):
         logger.warning("[RK Sampler] on_model_loaded: RK Sampler in all_samplers_map = %s", rk_in_map)
     except Exception:
         import traceback
-        logger.error("[RK Sampler] on_model_loaded エラー:\n%s", traceback.format_exc())
+        logger.error("[RK Sampler] on_model_loaded error:\n%s", traceback.format_exc())
 
 
 script_callbacks.on_model_loaded(_on_model_loaded)
@@ -876,20 +872,20 @@ script_callbacks.on_model_loaded(_on_model_loaded)
 
 try:
     _register()
-    logger.warning("[RK Sampler] 起動時登録完了")
+    logger.warning("[RK Sampler] Startup registration complete")
 except Exception as _exc:
     import traceback
-    logger.error("[RK Sampler] 登録エラー:\n%s", traceback.format_exc())
+    logger.error("[RK Sampler] Registration error:\n%s", traceback.format_exc())
 
 
 # ===========================================================================
-# Section 6: Script クラス — 生成タブの Script ペインに UI を追加
-#   「RK Sampler (Script)」として表示される。
-#   Sampling method ドロップダウンで「RK Sampler (Script)」を選んだとき、
-#   ここで設定した Method・rtol/atol で動作する。
+# Section 6: Script Class — adds UI to the Script pane in the generation tab
+#   Displayed as "RK Sampler (Script)".
+#   When "RK Sampler (Script)" is selected in the Sampling method dropdown,
+#   it operates with the Method and rtol/atol set here.
 # ===========================================================================
 
-# ページロード時の強制更新用ドロップダウン参照リスト（モジュールレベル）
+# Dropdown references for forced update on page load (module level)
 _rk_method_dropdowns = []
 
 try:
@@ -934,7 +930,7 @@ try:
                         value=DEF_LOG_ATOL,
                         label="Log Absolute Tolerance (10^x)",
                     )
-                with gr.Accordion("拡張設定", open=False):
+                with gr.Accordion("Advanced Settings", open=False):
                     max_steps = gr.Slider(
                         minimum=10, maximum=5000, step=10,
                         value=DEF_MAX_STEPS,
@@ -949,17 +945,17 @@ try:
                         pid_p = gr.Slider(
                             minimum=0.0, maximum=1.0, step=0.05,
                             value=RK_PID_KP,
-                            label="PID P 係数",
+                            label="PID P Coefficient",
                         )
                         pid_i = gr.Slider(
                             minimum=0.0, maximum=2.0, step=0.05,
                             value=RK_PID_KI,
-                            label="PID I 係数",
+                            label="PID I Coefficient",
                         )
                         pid_d = gr.Slider(
                             minimum=0.0, maximum=1.0, step=0.05,
                             value=RK_PID_KD,
-                            label="PID D 係数",
+                            label="PID D Coefficient",
                         )
 
             return [enabled, txt2img_method, hr_method, log_rtol, log_atol,
@@ -974,7 +970,7 @@ try:
                 getattr(p, "is_hr_pass", "N/A"),
                 enabled,
             )
-            # 有効化チェックボックスが OFF の場合は何もしない
+            # Do nothing when the enable checkbox is OFF
             if not enabled:
                 return
 
@@ -992,7 +988,7 @@ except ImportError:
     pass
 
 
-# ページロード時にドロップダウンを "Use same sampler" にリセットする
+# Reset dropdowns to "Use same sampler" on page load
 def _on_app_started(demo, app):
     if not _rk_method_dropdowns:
         return
@@ -1006,10 +1002,10 @@ def _on_app_started(demo, app):
 
         with demo:
             demo.load(fn=_reset_methods, inputs=[], outputs=all_dropdowns)
-        logger.warning("[RK Sampler] demo.load 登録完了: %d ドロップダウン", len(all_dropdowns))
+        logger.warning("[RK Sampler] demo.load registered: %d dropdown(s)", len(all_dropdowns))
     except Exception:
         import traceback
-        logger.error("[RK Sampler] demo.load 登録エラー:\n%s", traceback.format_exc())
+        logger.error("[RK Sampler] demo.load registration error:\n%s", traceback.format_exc())
 
 
 script_callbacks.on_app_started(_on_app_started)
