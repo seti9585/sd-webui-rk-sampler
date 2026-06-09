@@ -635,7 +635,10 @@ class RKMethodSampler(sd_samplers_common.Sampler):
             return sampler.sample(p, x, conditioning, unconditional_conditioning,
                                   steps=steps, image_conditioning=image_conditioning)
 
-        from backend.sampling.sampling_function import sampling_prepare, sampling_cleanup
+        try:
+            from backend.sampling.sampling_function import sampling_prepare, sampling_cleanup
+        except ModuleNotFoundError:
+            from modules_forge.forge_sampler import sampling_prepare, sampling_cleanup
 
         unet_patcher = self.model_wrap.inner_model.forge_objects.unet
         sampling_prepare(unet_patcher, x=x)
@@ -690,7 +693,10 @@ class RKMethodSampler(sd_samplers_common.Sampler):
             return sampler.sample_img2img(p, x, noise, conditioning, unconditional_conditioning,
                                           steps=steps, image_conditioning=image_conditioning)
 
-        from backend.sampling.sampling_function import sampling_prepare, sampling_cleanup
+        try:
+            from backend.sampling.sampling_function import sampling_prepare, sampling_cleanup
+        except ModuleNotFoundError:
+            from modules_forge.forge_sampler import sampling_prepare, sampling_cleanup
 
         unet_patcher = self.model_wrap.inner_model.forge_objects.unet
         sampling_prepare(unet_patcher, x=x)
