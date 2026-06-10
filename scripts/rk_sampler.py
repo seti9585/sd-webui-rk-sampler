@@ -130,6 +130,49 @@ def _get(key, default):
 
 
 # ---------------------------------------------------------------------------
+# Dtype-safe model wrapper
+# ---------------------------------------------------------------------------
+
+class _DtypeSafeModelWrapper:
+    """
+    Wraps a CFGDenoiser to ensure float32 input for all model calls.
+
+    torchode and scipy ODE solvers may run in float64 on CUDA.  All denoising
+    model internals and pre-/post-CFG hooks (SkimmedCFG, Mahiro CFG,
+    AutomaticCFG, etc.) expect float32 tensors.  Passing float64 latents
+    causes dtype mismatches in hook computations — most visibly in sign-based
+    mask comparisons (SkimmedCFG) at high CFG values — resulting in corrupted
+    images.
+
+    This wrapper casts inputs to float32 (o_dtype) before the model call and
+    converts the result back to the original tensor dtype, so the ODE
+    integration stays numerically consistent while the model and all hooks
+    always see float32.
+
+    The wrapper is a transparent no-op when o_dtype is already float32 (MPS,
+    DML, or fixed-step methods on CUDA).
+    """
+
+    def __init__(self, model, o_dtype: torch.dtype, o_device):
+        self._model    = model
+        self._o_dtype  = o_dtype
+        self._o_device = o_device
+
+    def __call__(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs):
+        if x.dtype == self._o_dtype:
+            return self._model(x, sigma, **kwargs)
+        x_fp   = x.to(dtype=self._o_dtype, device=self._o_device)
+        sig_fp = sigma.to(dtype=torch.float32, device=self._o_device)
+        out_fp = self._model(x_fp, sig_fp, **kwargs)
+        return out_fp.to(dtype=x.dtype, device=x.device)
+
+    def __getattr__(self, name: str):
+        # Forward attribute access to the wrapped model so callers reading
+        # properties like .step, .inner_model, etc. continue to work.
+        return getattr(self._model, name)
+
+
+# ---------------------------------------------------------------------------
 # Flow Matching detection and noise injection helpers  [patched]
 # ---------------------------------------------------------------------------
 
@@ -269,8 +312,11 @@ def _run_scipy_sampler(
         )
 
         with pbar:
+            # Wrap model for dtype safety (see _DtypeSafeModelWrapper).
+            model_fp = _DtypeSafeModelWrapper(model, o_dtype=torch.float32, o_device=x.device)
+
             term = ReFormeSciPyODETerm(
-                model      = model,
+                model      = model_fp,
                 o_device   = o_device,
                 o_dtype    = o_dtype,
                 o_shape_1  = o_shape_1,
@@ -356,9 +402,19 @@ def _run_torchode_sampler(
     from rk_core.controllers.scheduled_controller import ScheduledController
 
     is_adaptive = method_name in ADAPTIVE_METHODS
-    # Device and dtype setup
+    # Device and dtype for ODE integration.
+    # Adaptive methods use float64 on CUDA/CPU for accurate step-size error
+    # estimation.  Fixed-step methods (fe_euler1, fe_kutta4, etc.) use float32
+    # to match standard k-diffusion sampler behaviour and avoid sparkle / grain
+    # artifacts caused by float64 rounding differences accumulating over the
+    # sigma schedule, especially noticeable in hires.fix passes.
     c_device = "mps" if HAS_MPS else "cpu"
-    c_dtype  = torch.float32 if (HAS_MPS or HAS_DML) else torch.float64
+    if HAS_MPS or HAS_DML:
+        c_dtype = torch.float32
+    elif is_adaptive:
+        c_dtype = torch.float64
+    else:
+        c_dtype = torch.float32
     o_device = x.device
     o_dtype  = x.dtype
     o_shape  = x.shape
@@ -390,9 +446,15 @@ def _run_torchode_sampler(
         )
 
     with pbar:
+        # Wrap the model so that float64 ODE tensors are cast to float32
+        # before every model call.  This ensures pre-/post-CFG hooks such as
+        # SkimmedCFG receive float32 latents and produce correct results.
+        # The wrapper is a no-op when c_dtype is already float32.
+        model_fp = _DtypeSafeModelWrapper(model, o_dtype=torch.float32, o_device=x.device)
+
         # ODE term
         ode_fn = ReForgeODETerm(
-            model      = model,
+            model      = model_fp,
             c_device   = c_device,
             c_dtype    = c_dtype,
             o_device   = o_device,
