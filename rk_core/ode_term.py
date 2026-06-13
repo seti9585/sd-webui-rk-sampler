@@ -5,7 +5,12 @@ k-diffusion モデル API: model(x, sigma, **extra_args) -> denoised
 """
 from __future__ import annotations
 
+import logging
+import math
+
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class ReForgeODETerm:
@@ -86,16 +91,25 @@ class ReForgeODETerm:
         """
         # y の実際の shape と o_shape が一致しない場合は o_shape を更新する
         # （hires.fix でアップスケール後に latent サイズが変わる場合への対処）
-        actual_shape = (y.shape[0], self.o_shape[1], y.shape[1] // (self.o_shape[1] * self.o_shape[2] * self.o_shape[3]) ** 0, -1)
         try:
             y_4d = y.reshape(self.o_shape)
         except RuntimeError:
-            # o_shape と実際の y が合わない → reshape できる形に自動修正
-            import math
+            # o_shape と実際の y が合わない → reshape できる形に自動修正。
+            # 元の縦横比を保ってスケールを推定し、割り切れない場合のみ
+            # 正方形にフォールバックする（非正方 latent 対応）。
             b = y.shape[0]
             c = self.o_shape[1]
             hw = y.shape[1] // c
-            h = w = int(math.isqrt(hw))
+            h0, w0 = self.o_shape[2], self.o_shape[3]
+            h = int(round(math.sqrt(hw * h0 / w0))) if h0 > 0 and w0 > 0 else 0
+            if h <= 0 or hw % h != 0:
+                h = int(math.isqrt(hw))
+            w = hw // h
+            if h * w != hw:
+                raise RuntimeError(
+                    f"[RK Sampler] latent shape を推定できません: "
+                    f"flat_dim={y.shape[1]}, channels={c}"
+                )
             self.o_shape = (b, c, h, w)
             logger.warning("[RK Sampler] o_shape を %s に自動修正しました", self.o_shape)
             y_4d = y.reshape(self.o_shape)
