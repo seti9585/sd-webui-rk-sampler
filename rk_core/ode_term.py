@@ -1,7 +1,7 @@
 """
-reForge 用 ODE Term
-ComfyUI-RK-Sampler の TorchODEODETerm を reForge 向けに移植。
-k-diffusion モデル API: model(x, sigma, **extra_args) -> denoised
+ODE Term for reForge
+Port of ComfyUI-RK-Sampler's TorchODEODETerm to reForge.
+k-diffusion model API: model(x, sigma, **extra_args) -> denoised
 """
 from __future__ import annotations
 
@@ -15,27 +15,27 @@ logger = logging.getLogger(__name__)
 
 class ReForgeODETerm:
     """
-    torchode の AutoDiffAdjoint から呼ばれる ODE の右辺関数。
+    ODE right-hand side function called by torchode's AutoDiffAdjoint.
 
-    probability flow ODE:
-        dx/dσ = (x - D(x, σ)) / σ
-    D(x, σ) は CFGDenoiserKDiffusion が返す denoised latent。
+    Probability flow ODE:
+        dx/dsigma = (x - D(x, sigma)) / sigma
+    D(x, sigma) is the denoised latent returned by CFGDenoiserKDiffusion.
 
     Args:
-        model       : CFGDenoiserKDiffusion インスタンス
-        c_device    : ODE ソルバーが使うデバイス ("cpu" or "mps")
-        c_dtype     : ODE ソルバーが使う dtype (float64 or float32)
-        o_device    : 元の latent のデバイス (CUDA など)
-        o_dtype     : 元の latent の dtype
-        o_shape     : 元の latent の shape (batch, C, H, W)
-        min_sigma   : この sigma 以下はゼロ勾配で通過
-        t_max       : sigma の最大値
-        t_min       : sigma の最小値
-        n_steps     : sigma スケジュールのステップ数（プログレスバー用）
-        extra_args  : model に渡す追加引数 dict
-        callback    : reForge の callback 関数
-        pbar        : tqdm プログレスバー
-        is_adaptive : 適応ステップか固定ステップか（プログレスバー更新方法が変わる）
+        model       : CFGDenoiserKDiffusion instance
+        c_device    : device used by the ODE solver ("cpu" or "mps")
+        c_dtype     : dtype used by the ODE solver (float64 or float32)
+        o_device    : device of the original latent (e.g. CUDA)
+        o_dtype     : dtype of the original latent
+        o_shape     : shape of the original latent (batch, C, H, W)
+        min_sigma   : pass through with zero gradient at or below this sigma
+        t_max       : maximum sigma value
+        t_min       : minimum sigma value
+        n_steps     : number of steps in the sigma schedule (for the progress bar)
+        extra_args  : dict of extra arguments passed to the model
+        callback    : reForge callback function
+        pbar        : tqdm progress bar
+        is_adaptive : adaptive or fixed step (changes how the progress bar updates)
     """
 
     def __init__(
@@ -54,7 +54,7 @@ class ReForgeODETerm:
         callback=None,
         pbar=None,
         is_adaptive: bool = True,
-        cfg_denoiser=None,   # step カウンタ更新用（apply_refiner 対応）
+        cfg_denoiser=None,   # for updating the step counter (apply_refiner support)
     ):
         self.model       = model
         self.c_device    = c_device
@@ -72,31 +72,31 @@ class ReForgeODETerm:
         self.is_adaptive = is_adaptive
         self.cfg_denoiser = cfg_denoiser
 
-        # 内部状態
+        # Internal state
         self.n_callbacks   = 0
         self.pbar_step     = 0
         self.last_t        = None
         self.last_denoised = None
 
     # ------------------------------------------------------------------
-    # torchode の ODETerm ラッパーから vf(t, y, stats, args) として呼ばれる
+    # Called as vf(t, y, stats, args) from torchode's ODETerm wrapper
     # ------------------------------------------------------------------
     def __call__(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            t : (batch,)  現在の sigma 値
-            y : (batch, flat_dim)  現在の latent（flatten 済み）
+            t : (batch,)  current sigma value
+            y : (batch, flat_dim)  current latent (flattened)
         Returns:
             dy/dt : (batch, flat_dim)
         """
-        # y の実際の shape と o_shape が一致しない場合は o_shape を更新する
-        # （hires.fix でアップスケール後に latent サイズが変わる場合への対処）
+        # If the actual shape of y does not match o_shape, update o_shape
+        # (handles the case where the latent size changes after hires.fix upscaling)
         try:
             y_4d = y.reshape(self.o_shape)
         except RuntimeError:
-            # o_shape と実際の y が合わない → reshape できる形に自動修正。
-            # 元の縦横比を保ってスケールを推定し、割り切れない場合のみ
-            # 正方形にフォールバックする（非正方 latent 対応）。
+            # o_shape does not match the actual y -> auto-correct to a reshapeable form.
+            # Estimate the scale while preserving the original aspect ratio, and fall
+            # back to a square only when it does not divide evenly (non-square latent support).
             b = y.shape[0]
             c = self.o_shape[1]
             hw = y.shape[1] // c
@@ -107,13 +107,13 @@ class ReForgeODETerm:
             w = hw // h
             if h * w != hw:
                 raise RuntimeError(
-                    f"[RK Sampler] latent shape を推定できません: "
+                    f"[RK Sampler] cannot infer latent shape: "
                     f"flat_dim={y.shape[1]}, channels={c}"
                 )
             self.o_shape = (b, c, h, w)
-            logger.warning("[RK Sampler] o_shape を %s に自動修正しました", self.o_shape)
+            logger.warning("[RK Sampler] auto-corrected o_shape to %s", self.o_shape)
             y_4d = y.reshape(self.o_shape)
-        mask  = t <= self.min_sigma                              # (batch,)  sigma が小さすぎる行
+        mask  = t <= self.min_sigma                              # (batch,)  rows whose sigma is too small
 
         denoised = torch.zeros_like(y_4d)
 
@@ -121,9 +121,9 @@ class ReForgeODETerm:
             y_m = y_4d.to(self.o_device, dtype=self.o_dtype)
             t_m = t.to(self.o_device, dtype=self.o_dtype)
 
-            # フルバッチをモデルに渡す
-            # （マスクで一部だけ渡すと LoRA 等でテンソルサイズ不一致が起きる）
-            # t_m は (batch,) で渡す — sigma の次元を明示的に保証
+            # Pass the full batch to the model
+            # (passing only part of it via a mask causes tensor size mismatches with LoRA etc.)
+            # Pass t_m as (batch,) -- explicitly guarantee the sigma dimension
             if t_m.dim() == 0:
                 t_m = t_m.unsqueeze(0).expand(y_m.shape[0])
             elif t_m.shape[0] != y_m.shape[0]:
@@ -132,12 +132,12 @@ class ReForgeODETerm:
             with torch.no_grad():
                 denoised_full = self.model(y_m, t_m, **self.extra_args)
 
-            # マスクされたバッチ（sigma≦min_sigma）はゼロで埋める
+            # Fill masked batches (sigma <= min_sigma) with zeros
             denoised_full = denoised_full.to(self.c_device, dtype=self.c_dtype)
             denoised_full[mask] = 0.0
             denoised = denoised_full
 
-        # sigma = 0 付近はゼロ勾配
+        # Zero gradient near sigma = 0
         d = torch.where(
             mask.view(-1, 1, 1, 1),
             torch.zeros_like(y_4d),
@@ -150,19 +150,19 @@ class ReForgeODETerm:
         return d.flatten(start_dim=1)
 
     # ------------------------------------------------------------------
-    # AutoDiffAdjoint から各ステップ後に呼ばれる
+    # Called after each step from AutoDiffAdjoint
     # ------------------------------------------------------------------
     def trigger_callback(self, t: torch.Tensor, y: torch.Tensor):
-        """プログレスバー更新と reForge callback の発火。"""
+        """Update the progress bar and fire the reForge callback."""
         if self.pbar is None and self.callback is None:
             return
 
         t_mean = t.mean().item()
         self.n_callbacks += 1
 
-        # --- cfg_denoiser の step カウンタを更新（apply_refiner 対応）---
-        # 適応ステップは n_callbacks が p.steps を超えることがあるため
-        # total_steps - 1 を上限としてクランプする
+        # --- Update cfg_denoiser's step counter (apply_refiner support) ---
+        # Adaptive steps can make n_callbacks exceed p.steps, so clamp it
+        # to total_steps - 1 as the upper bound
         if self.cfg_denoiser is not None and hasattr(self.cfg_denoiser, "step"):
             total = getattr(self.cfg_denoiser, "total_steps", None)
             if total is not None:
@@ -170,22 +170,22 @@ class ReForgeODETerm:
             else:
                 self.cfg_denoiser.step = self.n_callbacks
 
-        # --- プログレスバー更新 ---
+        # --- Update the progress bar ---
         if self.pbar is not None:
             if self.is_adaptive:
-                # 適応ステップ: パーセンテージで進捗表示
+                # Adaptive step: show progress as a percentage
                 progress    = (self.t_max - t_mean) / max(self.t_max - self.t_min, 1e-8)
                 percentage  = progress * 100
                 self.pbar.update(percentage - self.pbar_step)
                 self.pbar_step = percentage
                 i = round(progress * self.n_steps)
             else:
-                # 固定ステップ: 1ステップずつカウント
+                # Fixed step: count one step at a time
                 self.pbar.update(1)
                 self.pbar_step += 1
                 i = self.pbar_step
 
-            self.pbar.set_postfix({"σ": f"{t_mean:.4f}"})
+            self.pbar.set_postfix({"sigma": f"{t_mean:.4f}"})
             self.pbar.refresh()
         else:
             progress = (self.t_max - t_mean) / max(self.t_max - self.t_min, 1e-8)
@@ -212,7 +212,7 @@ class ReForgeODETerm:
             })
 
     # ------------------------------------------------------------------
-    # torchode の ODETerm.init() から呼ばれる（統計初期化）
+    # Called from torchode's ODETerm.init() (statistics initialization)
     # ------------------------------------------------------------------
     def init(self, problem, stats: dict):
         pass
