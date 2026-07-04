@@ -650,11 +650,10 @@ class RKMethodSampler(sd_samplers_common.Sampler):
         icoeff    = getattr(p, "_rk_icoeff",    _get(OPT_ICOEFF,    DEF_ICOEFF))
         dcoeff    = getattr(p, "_rk_dcoeff",    _get(OPT_DCOEFF,    DEF_DCOEFF))
 
-        # Record in infotext
-        p.extra_generation_params["RK method"]    = self.method_name
-        p.extra_generation_params["RK log_rtol"]  = log_rtol
-        p.extra_generation_params["RK log_atol"]  = log_atol
-        p.extra_generation_params["RK max_steps"] = max_steps
+        # NOTE: infotext metadata is written centrally in RKSamplerScript.process()
+        # (Section 6), not here. Writing it per-pass used to overwrite the
+        # txt2img value with the hires.fix value under the same "RK method" key
+        # whenever hires.fix was used, which broke PNG Info round-trip fidelity.
 
         return _run_rk_sampler(
             method_name = self.method_name,
@@ -916,10 +915,8 @@ class RKScriptSampler(RKMethodSampler):
         icoeff    = getattr(p, "_rk_icoeff",    _get(OPT_ICOEFF,    DEF_ICOEFF))
         dcoeff    = getattr(p, "_rk_dcoeff",    _get(OPT_DCOEFF,    DEF_DCOEFF))
 
-        p.extra_generation_params["RK method"]    = self.method_name
-        p.extra_generation_params["RK log_rtol"]  = log_rtol
-        p.extra_generation_params["RK log_atol"]  = log_atol
-        p.extra_generation_params["RK max_steps"] = max_steps
+        # NOTE: infotext metadata is written centrally in RKSamplerScript.process()
+        # (below), not here. See the comment in RKMethodSampler._run() for why.
 
         return _run_rk_sampler(
             method_name = self.method_name,
@@ -1066,6 +1063,33 @@ try:
                             label="PID D Coefficient",
                         )
 
+            # Infotext round-trip (PNG Info -> Send to txt2img / img2img).
+            # There is no dedicated enabled key; the metadata write in process()
+            # below always includes "RK method" whenever the accordion was
+            # enabled, so its presence means ON. The Enable checkbox is bound
+            # through a callable because infotext paste leaves a component
+            # untouched when its key is absent (Forge Neo -> gr.skip(), reForge
+            # -> gr.update() no-op); a bare key could never turn the accordion
+            # off. The callable resolves a missing key to False, forcing OFF
+            # for faithful same-seed reproduction when an image generated
+            # without RK Sampler is sent.
+            #
+            # The metadata write itself lives in process(), not in the per-pass
+            # _run(), so that the txt2img and hires.fix method selections are
+            # recorded under separate keys instead of one overwriting the other.
+            self.infotext_fields = [
+                (enabled,        lambda d: "RK method" in d),
+                (txt2img_method, "RK method"),
+                (hr_method,      "RK hires method"),
+                (log_rtol,       "RK log_rtol"),
+                (log_atol,       "RK log_atol"),
+                (max_steps,      "RK max_steps"),
+                (min_sigma,      "RK min_sigma"),
+                (pid_p,          "RK pid_p"),
+                (pid_i,          "RK pid_i"),
+                (pid_d,          "RK pid_d"),
+            ]
+
             return [enabled, txt2img_method, hr_method, log_rtol, log_atol,
                     max_steps, min_sigma, pid_p, pid_i, pid_d]
 
@@ -1091,6 +1115,20 @@ try:
             p._rk_pcoeff         = float(pid_p)
             p._rk_icoeff         = float(pid_i)
             p._rk_dcoeff         = float(pid_d)
+
+            # Record in infotext. Written once here (before the batch loop) so
+            # create_infotext() captures it for every saved image. txt2img and
+            # hires.fix methods are recorded under separate keys so hires.fix
+            # no longer overwrites the txt2img value.
+            p.extra_generation_params["RK method"]       = txt2img_method
+            p.extra_generation_params["RK hires method"] = hr_method
+            p.extra_generation_params["RK log_rtol"]     = float(log_rtol)
+            p.extra_generation_params["RK log_atol"]     = float(log_atol)
+            p.extra_generation_params["RK max_steps"]    = int(max_steps)
+            p.extra_generation_params["RK min_sigma"]    = float(min_sigma)
+            p.extra_generation_params["RK pid_p"]        = float(pid_p)
+            p.extra_generation_params["RK pid_i"]        = float(pid_i)
+            p.extra_generation_params["RK pid_d"]        = float(pid_d)
 
 except ImportError:
     pass
