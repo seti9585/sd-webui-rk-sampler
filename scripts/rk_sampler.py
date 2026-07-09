@@ -15,9 +15,11 @@ Port of all ODE methods from ComfyUI-RK-Sampler
    fe_ralston3, fe_ralston4, fe_ssprk3, fe_wray3)
 - Different methods can be selected for txt2img and hires.fix
   (reForge's Custom ODE Settings only allows one choice)
+- rtol / atol can also be set independently for txt2img and hires.fix
 - Adaptive step (ae_*): automatic step size adjustment via PID controller
 - Fixed step (fe_*): fixed step size following the sigma schedule
-- rtol / atol / max_steps configurable per sampler in the Settings tab
+- max_steps and PID coefficients remain shared across both passes;
+  configurable per sampler in the Settings tab
 
 Dependencies:
   torchode  (pip install torchode)
@@ -127,6 +129,31 @@ DEF_DCOEFF    = 0.0
 
 def _get(key, default):
     return getattr(opts, key, default)
+
+
+def _resolve_rk_log_rtol(p) -> float:
+    """
+    Resolve the log10(rtol) to use for the current pass.
+
+    txt2img and hires.fix each have their own Script UI slider
+    (p._rk_txt2img_log_rtol / p._rk_hr_log_rtol), selected via
+    p.is_hr_pass, mirroring RKScriptSampler._get_method(). Falls back to
+    the legacy single-value attribute (_rk_log_rtol) if present, then to
+    the Settings tab default, for backward compatibility with older
+    callers that only ever set the flat attribute.
+    """
+    legacy_default = getattr(p, "_rk_log_rtol", _get(OPT_LOG_RTOL, DEF_LOG_RTOL))
+    if getattr(p, "is_hr_pass", False):
+        return getattr(p, "_rk_hr_log_rtol", legacy_default)
+    return getattr(p, "_rk_txt2img_log_rtol", legacy_default)
+
+
+def _resolve_rk_log_atol(p) -> float:
+    """Same resolution logic as _resolve_rk_log_rtol, for atol."""
+    legacy_default = getattr(p, "_rk_log_atol", _get(OPT_LOG_ATOL, DEF_LOG_ATOL))
+    if getattr(p, "is_hr_pass", False):
+        return getattr(p, "_rk_hr_log_atol", legacy_default)
+    return getattr(p, "_rk_txt2img_log_atol", legacy_default)
 
 
 # ---------------------------------------------------------------------------
@@ -642,18 +669,21 @@ class RKMethodSampler(sd_samplers_common.Sampler):
 
     def _run(self, p, x, sigmas, n_steps):
         """Use Script UI values if available, otherwise fall back to Settings tab values."""
-        log_rtol  = getattr(p, "_rk_log_rtol",  _get(OPT_LOG_RTOL,  DEF_LOG_RTOL))
-        log_atol  = getattr(p, "_rk_log_atol",  _get(OPT_LOG_ATOL,  DEF_LOG_ATOL))
+        log_rtol  = _resolve_rk_log_rtol(p)
+        log_atol  = _resolve_rk_log_atol(p)
         max_steps = int(getattr(p, "_rk_max_steps", _get(OPT_MAX_STEPS, DEF_MAX_STEPS)))
         min_sigma = getattr(p, "_rk_min_sigma", _get(OPT_MIN_SIGMA, DEF_MIN_SIGMA))
         pcoeff    = getattr(p, "_rk_pcoeff",    _get(OPT_PCOEFF,    DEF_PCOEFF))
         icoeff    = getattr(p, "_rk_icoeff",    _get(OPT_ICOEFF,    DEF_ICOEFF))
         dcoeff    = getattr(p, "_rk_dcoeff",    _get(OPT_DCOEFF,    DEF_DCOEFF))
 
-        # NOTE: infotext metadata is written centrally in RKSamplerScript.process()
-        # (Section 6), not here. Writing it per-pass used to overwrite the
-        # txt2img value with the hires.fix value under the same "RK method" key
-        # whenever hires.fix was used, which broke PNG Info round-trip fidelity.
+        pass_label = "hires" if getattr(p, "is_hr_pass", False) else "txt2img"
+
+        # Record in infotext (separate rtol/atol keys per pass)
+        p.extra_generation_params["RK method"] = self.method_name
+        p.extra_generation_params[f"RK {pass_label} log_rtol"] = log_rtol
+        p.extra_generation_params[f"RK {pass_label} log_atol"] = log_atol
+        p.extra_generation_params["RK max_steps"] = max_steps
 
         return _run_rk_sampler(
             method_name = self.method_name,
@@ -907,16 +937,20 @@ class RKScriptSampler(RKMethodSampler):
 
         self.method_name = method
 
-        log_rtol  = getattr(p, "_rk_log_rtol",  _get(OPT_LOG_RTOL,  DEF_LOG_RTOL))
-        log_atol  = getattr(p, "_rk_log_atol",  _get(OPT_LOG_ATOL,  DEF_LOG_ATOL))
+        log_rtol  = _resolve_rk_log_rtol(p)
+        log_atol  = _resolve_rk_log_atol(p)
         max_steps = int(getattr(p, "_rk_max_steps", _get(OPT_MAX_STEPS, DEF_MAX_STEPS)))
         min_sigma = getattr(p, "_rk_min_sigma", _get(OPT_MIN_SIGMA, DEF_MIN_SIGMA))
         pcoeff    = getattr(p, "_rk_pcoeff",    _get(OPT_PCOEFF,    DEF_PCOEFF))
         icoeff    = getattr(p, "_rk_icoeff",    _get(OPT_ICOEFF,    DEF_ICOEFF))
         dcoeff    = getattr(p, "_rk_dcoeff",    _get(OPT_DCOEFF,    DEF_DCOEFF))
 
-        # NOTE: infotext metadata is written centrally in RKSamplerScript.process()
-        # (below), not here. See the comment in RKMethodSampler._run() for why.
+        pass_label = "hires" if getattr(p, "is_hr_pass", False) else "txt2img"
+
+        p.extra_generation_params["RK method"] = self.method_name
+        p.extra_generation_params[f"RK {pass_label} log_rtol"] = log_rtol
+        p.extra_generation_params[f"RK {pass_label} log_atol"] = log_atol
+        p.extra_generation_params["RK max_steps"] = max_steps
 
         return _run_rk_sampler(
             method_name = self.method_name,
@@ -1025,15 +1059,28 @@ try:
                     )
                     _rk_method_dropdowns.append((txt2img_method, hr_method))
                 with gr.Row():
-                    log_rtol = gr.Slider(
+                    txt2img_log_rtol = gr.Slider(
                         minimum=-7.0, maximum=0.0, step=0.5,
                         value=DEF_LOG_RTOL,
-                        label="Log Relative Tolerance (10^x)",
+                        label="txt2img Log Relative Tolerance (10^x)",
                     )
-                    log_atol = gr.Slider(
+                    txt2img_log_atol = gr.Slider(
                         minimum=-7.0, maximum=0.0, step=0.5,
                         value=DEF_LOG_ATOL,
-                        label="Log Absolute Tolerance (10^x)",
+                        label="txt2img Log Absolute Tolerance (10^x)",
+                    )
+                with gr.Row():
+                    hr_log_rtol = gr.Slider(
+                        minimum=-7.0, maximum=0.0, step=0.5,
+                        value=DEF_LOG_RTOL,
+                        label="hires.fix Log Relative Tolerance (10^x)",
+                        visible=not is_img2img,
+                    )
+                    hr_log_atol = gr.Slider(
+                        minimum=-7.0, maximum=0.0, step=0.5,
+                        value=DEF_LOG_ATOL,
+                        label="hires.fix Log Absolute Tolerance (10^x)",
+                        visible=not is_img2img,
                     )
                 with gr.Accordion("Advanced Settings", open=False):
                     max_steps = gr.Slider(
@@ -1063,38 +1110,13 @@ try:
                             label="PID D Coefficient",
                         )
 
-            # Infotext round-trip (PNG Info -> Send to txt2img / img2img).
-            # There is no dedicated enabled key; the metadata write in process()
-            # below always includes "RK method" whenever the accordion was
-            # enabled, so its presence means ON. The Enable checkbox is bound
-            # through a callable because infotext paste leaves a component
-            # untouched when its key is absent (Forge Neo -> gr.skip(), reForge
-            # -> gr.update() no-op); a bare key could never turn the accordion
-            # off. The callable resolves a missing key to False, forcing OFF
-            # for faithful same-seed reproduction when an image generated
-            # without RK Sampler is sent.
-            #
-            # The metadata write itself lives in process(), not in the per-pass
-            # _run(), so that the txt2img and hires.fix method selections are
-            # recorded under separate keys instead of one overwriting the other.
-            self.infotext_fields = [
-                (enabled,        lambda d: "RK method" in d),
-                (txt2img_method, "RK method"),
-                (hr_method,      "RK hires method"),
-                (log_rtol,       "RK log_rtol"),
-                (log_atol,       "RK log_atol"),
-                (max_steps,      "RK max_steps"),
-                (min_sigma,      "RK min_sigma"),
-                (pid_p,          "RK pid_p"),
-                (pid_i,          "RK pid_i"),
-                (pid_d,          "RK pid_d"),
-            ]
-
-            return [enabled, txt2img_method, hr_method, log_rtol, log_atol,
+            return [enabled, txt2img_method, hr_method,
+                    txt2img_log_rtol, txt2img_log_atol, hr_log_rtol, hr_log_atol,
                     max_steps, min_sigma, pid_p, pid_i, pid_d]
 
         def process(self, p,
-                    enabled, txt2img_method, hr_method, log_rtol, log_atol,
+                    enabled, txt2img_method, hr_method,
+                    txt2img_log_rtol, txt2img_log_atol, hr_log_rtol, hr_log_atol,
                     max_steps, min_sigma, pid_p, pid_i, pid_d):
             logger.debug(
                 "[RK Sampler] process() called: sampler_name='%s' is_hr_pass=%s enabled=%s",
@@ -1106,29 +1128,17 @@ try:
             if not enabled:
                 return
 
-            p._rk_txt2img_method = txt2img_method
-            p._rk_hr_method      = hr_method
-            p._rk_log_rtol       = float(log_rtol)
-            p._rk_log_atol       = float(log_atol)
-            p._rk_max_steps      = int(max_steps)
-            p._rk_min_sigma      = float(min_sigma)
-            p._rk_pcoeff         = float(pid_p)
-            p._rk_icoeff         = float(pid_i)
-            p._rk_dcoeff         = float(pid_d)
-
-            # Record in infotext. Written once here (before the batch loop) so
-            # create_infotext() captures it for every saved image. txt2img and
-            # hires.fix methods are recorded under separate keys so hires.fix
-            # no longer overwrites the txt2img value.
-            p.extra_generation_params["RK method"]       = txt2img_method
-            p.extra_generation_params["RK hires method"] = hr_method
-            p.extra_generation_params["RK log_rtol"]     = float(log_rtol)
-            p.extra_generation_params["RK log_atol"]     = float(log_atol)
-            p.extra_generation_params["RK max_steps"]    = int(max_steps)
-            p.extra_generation_params["RK min_sigma"]    = float(min_sigma)
-            p.extra_generation_params["RK pid_p"]        = float(pid_p)
-            p.extra_generation_params["RK pid_i"]        = float(pid_i)
-            p.extra_generation_params["RK pid_d"]        = float(pid_d)
+            p._rk_txt2img_method   = txt2img_method
+            p._rk_hr_method        = hr_method
+            p._rk_txt2img_log_rtol = float(txt2img_log_rtol)
+            p._rk_txt2img_log_atol = float(txt2img_log_atol)
+            p._rk_hr_log_rtol      = float(hr_log_rtol)
+            p._rk_hr_log_atol      = float(hr_log_atol)
+            p._rk_max_steps        = int(max_steps)
+            p._rk_min_sigma        = float(min_sigma)
+            p._rk_pcoeff           = float(pid_p)
+            p._rk_icoeff           = float(pid_i)
+            p._rk_dcoeff           = float(pid_d)
 
 except ImportError:
     pass
