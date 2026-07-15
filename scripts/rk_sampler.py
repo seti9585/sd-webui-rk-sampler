@@ -1116,6 +1116,22 @@ try:
                             label="PID D Coefficient",
                         )
 
+            # Disable saving/restoring these sliders to ui-config.json.
+            # They have no elem_id, so WebUI (modules/ui_loadsave.py) persists
+            # their value AND min/max/step to ui-config.json keyed by label
+            # and, on startup, restores them over the code-defined values.
+            # This is exactly what pinned Max ODE Steps at the retired
+            # 1000/5000/step-10 scale after the code moved to 250/500/step-1:
+            # the stale ui-config entry silently overrode the new definition.
+            # Setting do_not_save_to_config skips both saving and restoring,
+            # so the code values always win. Runtime adjustments are still
+            # passed via p._rk_* in process(), and per-image values round-trip
+            # through infotext, so nothing is lost.
+            for _slider in (txt2img_log_rtol, txt2img_log_atol,
+                            hr_log_rtol, hr_log_atol,
+                            max_steps, min_sigma, pid_p, pid_i, pid_d):
+                _slider.do_not_save_to_config = True
+
             # PNG infotext round-trip (Send to txt2img / img2img).
             # Keys must match those written in add_infotext(). Methods and
             # tolerances are recorded per pass, so txt2img and hires controls
