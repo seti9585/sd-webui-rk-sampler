@@ -120,7 +120,7 @@ OPT_DCOEFF    = "rk_sampler_dcoeff"      # PID D coefficient
 # Default values
 DEF_LOG_RTOL  = -3.0
 DEF_LOG_ATOL  = -4.0
-DEF_MAX_STEPS = 1000
+DEF_MAX_STEPS = 250
 DEF_MIN_SIGMA = 1e-5
 DEF_PCOEFF    = 0.0
 DEF_ICOEFF    = 1.0
@@ -679,8 +679,13 @@ class RKMethodSampler(sd_samplers_common.Sampler):
 
         pass_label = "hires" if getattr(p, "is_hr_pass", False) else "txt2img"
 
-        # Record in infotext (separate rtol/atol keys per pass)
+        # Record in infotext (separate rtol/atol keys per pass).
+        # "RK method" (legacy, unqualified) is kept for backward compatibility
+        # with PNGs / readers that expect the old single key; the per-pass
+        # "RK {pass_label} method" keys are what the UI restore path reads, so
+        # txt2img and hires methods round-trip independently.
         p.extra_generation_params["RK method"] = self.method_name
+        p.extra_generation_params[f"RK {pass_label} method"] = self.method_name
         p.extra_generation_params[f"RK {pass_label} log_rtol"] = log_rtol
         p.extra_generation_params[f"RK {pass_label} log_atol"] = log_atol
         p.extra_generation_params["RK max_steps"] = max_steps
@@ -861,7 +866,7 @@ def _on_ui_settings():
         default=DEF_MAX_STEPS,
         label="Max ODE Steps",
         component=gr.Slider,
-        component_args={"minimum": 10, "maximum": 5000, "step": 10},
+        component_args={"minimum": 1, "maximum": 500, "step": 1},
         section=section,
     ).info("Effective for ae_* / se_* methods. Failsafe upper limit when adaptive steps do not converge."))
 
@@ -948,6 +953,7 @@ class RKScriptSampler(RKMethodSampler):
         pass_label = "hires" if getattr(p, "is_hr_pass", False) else "txt2img"
 
         p.extra_generation_params["RK method"] = self.method_name
+        p.extra_generation_params[f"RK {pass_label} method"] = self.method_name
         p.extra_generation_params[f"RK {pass_label} log_rtol"] = log_rtol
         p.extra_generation_params[f"RK {pass_label} log_atol"] = log_atol
         p.extra_generation_params["RK max_steps"] = max_steps
@@ -1084,7 +1090,7 @@ try:
                     )
                 with gr.Accordion("Advanced Settings", open=False):
                     max_steps = gr.Slider(
-                        minimum=10, maximum=5000, step=10,
+                        minimum=1, maximum=500, step=1,
                         value=DEF_MAX_STEPS,
                         label="Max ODE Steps",
                     )
@@ -1109,6 +1115,40 @@ try:
                             value=RK_PID_KD,
                             label="PID D Coefficient",
                         )
+
+            # PNG infotext round-trip (Send to txt2img / img2img).
+            # Keys must match those written in add_infotext(). Methods and
+            # tolerances are recorded per pass, so txt2img and hires controls
+            # restore independently.
+            #
+            # enabled uses a callable: infotext paste leaves a component
+            # untouched when its key is absent, so a bare key string could
+            # never force the accordion OFF. Returning False on a missing key
+            # forces OFF when a PNG generated without RK Sampler is pasted,
+            # which is required for faithful reproduction. Presence of any
+            # RK method key (new per-pass or legacy unqualified) means it was on.
+            #
+            # txt2img_method / hr_method use callables with a legacy fallback:
+            # newer PNGs carry "RK txt2img method" / "RK hires method", but
+            # PNGs from before the per-pass split only have the unqualified
+            # "RK method". Falling back to it keeps older images restorable.
+            # gr.update() (no-op) is returned when nothing matches, leaving the
+            # dropdown at its current value rather than blanking it.
+            self.infotext_fields = [
+                (enabled, lambda d: ("RK txt2img method" in d)
+                                    or ("RK hires method" in d)
+                                    or ("RK method" in d)),
+                (txt2img_method, lambda d: d.get("RK txt2img method")
+                                           or d.get("RK method")
+                                           or gr.update()),
+                (hr_method,      lambda d: d.get("RK hires method")
+                                           or d.get("RK method")
+                                           or gr.update()),
+                (txt2img_log_rtol, "RK txt2img log_rtol"),
+                (txt2img_log_atol, "RK txt2img log_atol"),
+                (hr_log_rtol,      "RK hires log_rtol"),
+                (hr_log_atol,      "RK hires log_atol"),
+            ]
 
             return [enabled, txt2img_method, hr_method,
                     txt2img_log_rtol, txt2img_log_atol, hr_log_rtol, hr_log_atol,
