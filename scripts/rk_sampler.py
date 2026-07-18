@@ -257,6 +257,63 @@ def _load_method_class(method_name: str):
 # Section 2: Core Sampling Functions
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Sigma schedule sanitation  [patched]
+# ---------------------------------------------------------------------------
+
+def _sched_emit(msg: str) -> None:
+    # Emit schedule warnings on BOTH channels: Forge Neo suppresses
+    # module-level logger output, so the stderr print is required there,
+    # while reForge shows the logger line. Seeing the same line twice on
+    # reForge is an accepted cost of being visible on both backends.
+    logger.warning(msg)
+    print(msg, file=sys.stderr)
+
+
+def _sanitize_sigma_schedule(sigmas: torch.Tensor, context: str) -> torch.Tensor:
+    """Enforce a strictly decreasing sigma schedule.
+
+    Background: table-based schedulers (e.g. AYS) interpolate a small anchor
+    table up to the requested step count. On flow-matching models (Anima)
+    the sigma range is compressed to roughly [0, 1], and at high step counts
+    the interpolation can collapse adjacent steps to the same floating point
+    value near sigma_min. torchdiffeq rejects such arrays up front
+    ("t must be strictly increasing or decreasing"), and a zero-width step
+    would stall torchode's scheduled controller (t never advances).
+
+    Removing the collapsed entries preserves the exact set of distinct sigma
+    points, so the integration path is unchanged - the collapsed entries never
+    were resolvable steps in the first place.
+
+    Keeps the first element, then keeps each later element only if it is
+    strictly smaller than the last kept one (schedules in this pipeline are
+    always descending; do NOT sort). Returns the input unchanged when it is
+    already strictly decreasing.
+    """
+    n = sigmas.numel()
+    if n < 2:
+        return sigmas
+    vals = sigmas.tolist()
+    keep = [0]
+    last = vals[0]
+    for i in range(1, n):
+        if vals[i] < last:
+            keep.append(i)
+            last = vals[i]
+    if len(keep) == n:
+        return sigmas
+    dropped = n - len(keep)
+    kept = sigmas[torch.tensor(keep, dtype=torch.long, device=sigmas.device)]
+    _sched_emit(
+        f"[{context}] sigma schedule was not strictly decreasing: dropped "
+        f"{dropped} collapsed step(s) out of {n} (typical cause: table-based "
+        f"scheduler interpolated at a high step count on a compressed "
+        f"flow-matching sigma range); proceeding with {kept.numel() - 1} "
+        f"effective step(s)"
+    )
+    return kept
+
+
 def _run_rk_sampler(
     method_name: str,
     model,
@@ -273,6 +330,17 @@ def _run_rk_sampler(
     dcoeff: float    = DEF_DCOEFF,
 ):
     """Dispatch to torchode or scipy implementation depending on the method."""
+    # [patched] Sanitize the incoming schedule once for both backends.
+    # A zero-width step would stall torchode's ScheduledController
+    # (t never advances), and scipy/torchdiffeq-style front ends reject
+    # non-strictly-monotonic time arrays.
+    sigmas = _sanitize_sigma_schedule(sigmas, "RK Sampler")
+    if sigmas.numel() < 2:
+        _sched_emit(
+            "[RK Sampler] degenerate sigma schedule "
+            "(fewer than 2 distinct values); returning input unchanged"
+        )
+        return x
     if method_name in SCIPY_METHODS:
         return _run_scipy_sampler(
             method_name=method_name, model=model, x=x, sigmas=sigmas,
@@ -449,6 +517,18 @@ def _run_torchode_sampler(
 
     x_c      = x.to(c_device, dtype=c_dtype)
     sigmas_c = sigmas.to(c_device, dtype=c_dtype)
+
+    # [patched] Re-run sanitation after the dtype cast: a downcast can
+    # collapse adjacent values that were distinct at the incoming
+    # precision, and the ScheduledController consumes this cast array.
+    if not is_adaptive:
+        sigmas_c = _sanitize_sigma_schedule(sigmas_c, "RK Sampler")
+        if sigmas_c.numel() < 2:
+            _sched_emit(
+                "[RK Sampler] degenerate sigma schedule after dtype "
+                "cast; returning input unchanged"
+            )
+            return x
 
     t_max = sigmas_c.max().item()
     t_min = sigmas_c.min().item()
