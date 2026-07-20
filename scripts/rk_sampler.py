@@ -257,63 +257,6 @@ def _load_method_class(method_name: str):
 # Section 2: Core Sampling Functions
 # ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Sigma schedule sanitation  [patched]
-# ---------------------------------------------------------------------------
-
-def _sched_emit(msg: str) -> None:
-    # Emit schedule warnings on BOTH channels: Forge Neo suppresses
-    # module-level logger output, so the stderr print is required there,
-    # while reForge shows the logger line. Seeing the same line twice on
-    # reForge is an accepted cost of being visible on both backends.
-    logger.warning(msg)
-    print(msg, file=sys.stderr)
-
-
-def _sanitize_sigma_schedule(sigmas: torch.Tensor, context: str) -> torch.Tensor:
-    """Enforce a strictly decreasing sigma schedule.
-
-    Background: table-based schedulers (e.g. AYS) interpolate a small anchor
-    table up to the requested step count. On flow-matching models (Anima)
-    the sigma range is compressed to roughly [0, 1], and at high step counts
-    the interpolation can collapse adjacent steps to the same floating point
-    value near sigma_min. torchdiffeq rejects such arrays up front
-    ("t must be strictly increasing or decreasing"), and a zero-width step
-    would stall torchode's scheduled controller (t never advances).
-
-    Removing the collapsed entries preserves the exact set of distinct sigma
-    points, so the integration path is unchanged - the collapsed entries never
-    were resolvable steps in the first place.
-
-    Keeps the first element, then keeps each later element only if it is
-    strictly smaller than the last kept one (schedules in this pipeline are
-    always descending; do NOT sort). Returns the input unchanged when it is
-    already strictly decreasing.
-    """
-    n = sigmas.numel()
-    if n < 2:
-        return sigmas
-    vals = sigmas.tolist()
-    keep = [0]
-    last = vals[0]
-    for i in range(1, n):
-        if vals[i] < last:
-            keep.append(i)
-            last = vals[i]
-    if len(keep) == n:
-        return sigmas
-    dropped = n - len(keep)
-    kept = sigmas[torch.tensor(keep, dtype=torch.long, device=sigmas.device)]
-    _sched_emit(
-        f"[{context}] sigma schedule was not strictly decreasing: dropped "
-        f"{dropped} collapsed step(s) out of {n} (typical cause: table-based "
-        f"scheduler interpolated at a high step count on a compressed "
-        f"flow-matching sigma range); proceeding with {kept.numel() - 1} "
-        f"effective step(s)"
-    )
-    return kept
-
-
 def _run_rk_sampler(
     method_name: str,
     model,
@@ -330,17 +273,6 @@ def _run_rk_sampler(
     dcoeff: float    = DEF_DCOEFF,
 ):
     """Dispatch to torchode or scipy implementation depending on the method."""
-    # [patched] Sanitize the incoming schedule once for both backends.
-    # A zero-width step would stall torchode's ScheduledController
-    # (t never advances), and scipy/torchdiffeq-style front ends reject
-    # non-strictly-monotonic time arrays.
-    sigmas = _sanitize_sigma_schedule(sigmas, "RK Sampler")
-    if sigmas.numel() < 2:
-        _sched_emit(
-            "[RK Sampler] degenerate sigma schedule "
-            "(fewer than 2 distinct values); returning input unchanged"
-        )
-        return x
     if method_name in SCIPY_METHODS:
         return _run_scipy_sampler(
             method_name=method_name, model=model, x=x, sigmas=sigmas,
@@ -517,18 +449,6 @@ def _run_torchode_sampler(
 
     x_c      = x.to(c_device, dtype=c_dtype)
     sigmas_c = sigmas.to(c_device, dtype=c_dtype)
-
-    # [patched] Re-run sanitation after the dtype cast: a downcast can
-    # collapse adjacent values that were distinct at the incoming
-    # precision, and the ScheduledController consumes this cast array.
-    if not is_adaptive:
-        sigmas_c = _sanitize_sigma_schedule(sigmas_c, "RK Sampler")
-        if sigmas_c.numel() < 2:
-            _sched_emit(
-                "[RK Sampler] degenerate sigma schedule after dtype "
-                "cast; returning input unchanged"
-            )
-            return x
 
     t_max = sigmas_c.max().item()
     t_min = sigmas_c.min().item()
@@ -760,11 +680,20 @@ class RKMethodSampler(sd_samplers_common.Sampler):
         pass_label = "hires" if getattr(p, "is_hr_pass", False) else "txt2img"
 
         # Record in infotext (separate rtol/atol keys per pass).
-        # "RK method" (legacy, unqualified) is kept for backward compatibility
-        # with PNGs / readers that expect the old single key; the per-pass
-        # "RK {pass_label} method" keys are what the UI restore path reads, so
-        # txt2img and hires methods round-trip independently.
-        p.extra_generation_params["RK method"] = self.method_name
+        # The per-pass "RK {pass_label} method" keys are what the UI restore
+        # path reads, so txt2img and hires methods round-trip independently.
+        #
+        # "RK method" (legacy, unqualified) is written ONLY on the txt2img
+        # pass. Previously it was written on every pass, which caused a false
+        # restore: when RK runs only at hires (e.g. TDE Sampler delegates its
+        # hires pass to RK), the unqualified key carried the hires method name,
+        # and the txt2img_method restore callable fell back to it, wrongly
+        # setting the txt2img Method dropdown instead of leaving it at
+        # "Use same sampler". Scoping legacy to txt2img makes the fallback fire
+        # solely for genuine txt2img RK runs and for pre-per-pass-split PNGs
+        # (which only ever carried a txt2img method under the unqualified key).
+        if pass_label == "txt2img":
+            p.extra_generation_params["RK method"] = self.method_name
         p.extra_generation_params[f"RK {pass_label} method"] = self.method_name
         p.extra_generation_params[f"RK {pass_label} log_rtol"] = log_rtol
         p.extra_generation_params[f"RK {pass_label} log_atol"] = log_atol
@@ -1032,7 +961,12 @@ class RKScriptSampler(RKMethodSampler):
 
         pass_label = "hires" if getattr(p, "is_hr_pass", False) else "txt2img"
 
-        p.extra_generation_params["RK method"] = self.method_name
+        # "RK method" (legacy, unqualified) is written ONLY on the txt2img
+        # pass; see the matching note in the plain-sampler path above for the
+        # full rationale (prevents a hires-only method from being restored into
+        # the txt2img Method dropdown on Send to txt2img).
+        if pass_label == "txt2img":
+            p.extra_generation_params["RK method"] = self.method_name
         p.extra_generation_params[f"RK {pass_label} method"] = self.method_name
         p.extra_generation_params[f"RK {pass_label} log_rtol"] = log_rtol
         p.extra_generation_params[f"RK {pass_label} log_atol"] = log_atol
@@ -1196,22 +1130,6 @@ try:
                             label="PID D Coefficient",
                         )
 
-            # Disable saving/restoring these sliders to ui-config.json.
-            # They have no elem_id, so WebUI (modules/ui_loadsave.py) persists
-            # their value AND min/max/step to ui-config.json keyed by label
-            # and, on startup, restores them over the code-defined values.
-            # This is exactly what pinned Max ODE Steps at the retired
-            # 1000/5000/step-10 scale after the code moved to 250/500/step-1:
-            # the stale ui-config entry silently overrode the new definition.
-            # Setting do_not_save_to_config skips both saving and restoring,
-            # so the code values always win. Runtime adjustments are still
-            # passed via p._rk_* in process(), and per-image values round-trip
-            # through infotext, so nothing is lost.
-            for _slider in (txt2img_log_rtol, txt2img_log_atol,
-                            hr_log_rtol, hr_log_atol,
-                            max_steps, min_sigma, pid_p, pid_i, pid_d):
-                _slider.do_not_save_to_config = True
-
             # PNG infotext round-trip (Send to txt2img / img2img).
             # Keys must match those written in add_infotext(). Methods and
             # tolerances are recorded per pass, so txt2img and hires controls
@@ -1230,6 +1148,13 @@ try:
             # "RK method". Falling back to it keeps older images restorable.
             # gr.update() (no-op) is returned when nothing matches, leaving the
             # dropdown at its current value rather than blanking it.
+            #
+            # Note: add_infotext() now writes the unqualified "RK method" only
+            # on the txt2img pass, so a hires-only run (e.g. TDE delegating to
+            # RK at hires) no longer emits it. That is why the txt2img_method
+            # fallback below does not misfire on such PNGs: with no "RK method"
+            # present, txt2img_method stays at its current value ("Use same
+            # sampler") while hr_method restores from "RK hires method".
             self.infotext_fields = [
                 (enabled, lambda d: ("RK txt2img method" in d)
                                     or ("RK hires method" in d)
