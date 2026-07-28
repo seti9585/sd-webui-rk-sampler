@@ -108,6 +108,24 @@ SCIPY_METHODS = {
 
 ALL_METHODS = {**ADAPTIVE_METHODS, **FIXED_METHODS, **SCIPY_METHODS}
 
+
+def _tol_sliders_interactive(method_value):
+    """Return whether the log_rtol / log_atol sliders should be interactive.
+
+    Tolerances only affect methods that size their steps from an error
+    estimate. Two families do that here: the torchode adaptive methods
+    (ae_*), which drive a PIDController built from rtol/atol, and the scipy
+    methods (se_*), whose internal step controller reads the same two values.
+    Fixed-step methods (fe_*) run a ScheduledController that follows the sigma
+    schedule and never looks at rtol/atol, and the USE_REFORGE / TO_TDE
+    dropdown choices delegate away from RK Sampler before any solving happens.
+    So the sliders are interactive only for ae_* and se_*; in every other case
+    they are greyed out. Only the interactive flag changes here, the stored
+    slider values are never touched.
+    """
+    return method_value in ADAPTIVE_METHODS or method_value in SCIPY_METHODS
+
+
 # Options keys
 OPT_LOG_RTOL  = "rk_sampler_log_rtol"    # relative tolerance for adaptive steps
 OPT_LOG_ATOL  = "rk_sampler_log_atol"    # absolute tolerance for adaptive steps
@@ -1083,11 +1101,13 @@ try:
                         minimum=-7.0, maximum=0.0, step=0.5,
                         value=DEF_LOG_RTOL,
                         label="txt2img Log Relative Tolerance (10^x)",
+                        interactive=_tol_sliders_interactive(USE_REFORGE),
                     )
                     txt2img_log_atol = gr.Slider(
                         minimum=-7.0, maximum=0.0, step=0.5,
                         value=DEF_LOG_ATOL,
                         label="txt2img Log Absolute Tolerance (10^x)",
+                        interactive=_tol_sliders_interactive(USE_REFORGE),
                     )
                 with gr.Row():
                     hr_log_rtol = gr.Slider(
@@ -1095,12 +1115,14 @@ try:
                         value=DEF_LOG_RTOL,
                         label="hires.fix Log Relative Tolerance (10^x)",
                         visible=not is_img2img,
+                        interactive=_tol_sliders_interactive(USE_REFORGE),
                     )
                     hr_log_atol = gr.Slider(
                         minimum=-7.0, maximum=0.0, step=0.5,
                         value=DEF_LOG_ATOL,
                         label="hires.fix Log Absolute Tolerance (10^x)",
                         visible=not is_img2img,
+                        interactive=_tol_sliders_interactive(USE_REFORGE),
                     )
                 with gr.Accordion("Advanced Settings", open=False):
                     max_steps = gr.Slider(
@@ -1129,6 +1151,48 @@ try:
                             value=RK_PID_KD,
                             label="PID D Coefficient",
                         )
+
+                # Disable saving/restoring these sliders to ui-config.json.
+                # They have no elem_id, so WebUI (modules/ui_loadsave.py)
+                # persists their values to ui-config.json keyed by label and,
+                # on startup, restores them over the code-defined `value`.
+                # As a result, reinstalling the extension keeps stale values
+                # instead of the code defaults (DEF_LOG_RTOL / DEF_LOG_ATOL).
+                # Setting do_not_save_to_config skips both saving and
+                # restoring, so the code `value` is always used. Runtime
+                # adjustments are still passed via p._rk_txt2img_log_rtol
+                # etc. in process(), so generation is unaffected.
+                for _slider in (txt2img_log_rtol, txt2img_log_atol,
+                                hr_log_rtol, hr_log_atol):
+                    _slider.do_not_save_to_config = True
+
+                # Grey out the tolerance sliders when the selected method does
+                # not use rtol/atol (fixed-step fe_*, USE_REFORGE, or TO_TDE).
+                # The dropdown .change events cover live user edits; the
+                # sliders' creation-time `interactive` handles the initial page
+                # state for the default USE_REFORGE value. Values are preserved
+                # (only the interactive flag toggles), so switching back to an
+                # ae_* or se_* method restores the previous numbers.
+                def _update_txt2img_tol(method_value):
+                    state = _tol_sliders_interactive(method_value)
+                    return (gr.update(interactive=state),
+                            gr.update(interactive=state))
+
+                def _update_hires_tol(method_value):
+                    state = _tol_sliders_interactive(method_value)
+                    return (gr.update(interactive=state),
+                            gr.update(interactive=state))
+
+                txt2img_method.change(
+                    fn=_update_txt2img_tol,
+                    inputs=[txt2img_method],
+                    outputs=[txt2img_log_rtol, txt2img_log_atol],
+                )
+                hr_method.change(
+                    fn=_update_hires_tol,
+                    inputs=[hr_method],
+                    outputs=[hr_log_rtol, hr_log_atol],
+                )
 
             # PNG infotext round-trip (Send to txt2img / img2img).
             # Keys must match those written in add_infotext(). Methods and
