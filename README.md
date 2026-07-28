@@ -7,8 +7,8 @@ powered by [torchode](https://github.com/martenlienen/torchode).
 
 Port of [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler) by memmaptensor.
 
-> Unlike reForge's built-in samplers, this extension registers as an independent sampler,  
-> allowing different solvers to be selected for txt2img and hires.fix separately.
+> Unlike reForge's built-in ODE Custom, this extension registers as an independent sampler,  
+> allowing different methods to be selected for txt2img and hires.fix separately.
 
 ---
 
@@ -16,12 +16,12 @@ Port of [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler)
 
 - Registers **22 methods** as the **"RK Sampler"** entry in the sampling method dropdown.
 - **txt2img and Hires.fix can use different methods** via the Script accordion.
-- **Relative/absolute tolerance can also be set independently for txt2img and Hires.fix.**
-- Adaptive methods (`ae_*`) adjust step size automatically via PID controller.
-- Fixed-step methods (`fe_*`) follow the sigma schedule like standard samplers.
-- Scipy adaptive methods (`se_*`) use `scipy.integrate` as the ODE backend.
-- Supports **Flow Matching models** (Anima / FLUX / SD3) with correct noise injection in Hires.fix.
-- Parameters (relative tolerance / absolute tolerance / max_steps / PID) can be set per-generation in the Script UI, overriding the Settings tab defaults.
+- **rtol / atol can also be set independently** for txt2img and hires.fix.
+- Adaptive-step methods (`ae_*`) size each step with a PID controller driven by the tolerances.
+- SciPy methods (`se_*`) use their own internal step control, reading the same tolerances.
+- Fixed-step methods (`fe_*`) follow the sigma schedule and use the WebUI step count directly.
+- The tolerance sliders are **greyed out automatically** when the selected method does not use them (any fixed-step method, `Use same sampler`, or `→ TDE Sampler`).
+- Max ODE Steps, Min Sigma and the PID coefficients live under **Advanced Settings** and are shared across both passes.
 - Generation parameters are embedded in PNG infotext for reproducibility.
 
 ---
@@ -32,17 +32,10 @@ Port of [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler)
 pip install torchode
 ```
 
-**scipy** is optional; required only for `se_*` methods:
+No other packages are needed beyond what is already included in your WebUI.
 
-```bash
-pip install scipy
-```
-
-No other packages are needed beyond what is already included in your WebUI.  
-GPU support: CUDA / MPS / DirectML.
-
-> This extension uses `set_model_sampler_*_function`, which is part of the Forge
-> backend. It is not available in A1111 (AUTOMATIC1111).
+> This extension relies on the Forge backend sampling functions.  
+> It is not available in A1111 (AUTOMATIC1111).
 
 ---
 
@@ -51,7 +44,7 @@ GPU support: CUDA / MPS / DirectML.
 **Extensions → Install from URL:**
 
 ```
-https://github.com/seti9585/sd-webui-rk-sampler
+https://github.com/seti9585/sd-webui-RK-Sampler
 ```
 
 ---
@@ -72,160 +65,29 @@ Expand the **"RK Sampler"** accordion in the script section to configure:
 |---|---|
 | **txt2img Method** | Method used for txt2img (and img2img). |
 | **hires.fix Method** | Method used for the Hires.fix pass only. |
-| **txt2img Log Relative Tolerance** | `10^x` relative tolerance (rtol) for txt2img, effective for adaptive methods (`ae_*` / `se_*`). |
-| **txt2img Log Absolute Tolerance** | `10^x` absolute tolerance (atol) for txt2img. |
-| **hires.fix Log Relative Tolerance** | `10^x` relative tolerance (rtol) for the Hires.fix pass only. |
-| **hires.fix Log Absolute Tolerance** | `10^x` absolute tolerance (atol) for the Hires.fix pass only. |
-| **Max ODE Steps** | Step count cap for adaptive methods (shared across both passes). |
-| **Min Sigma** | Lower cutoff below which gradient is treated as zero (shared). |
-| **PID P / I / D** | Step-size controller coefficients (`ae_*` only, shared across both passes). |
+| **txt2img Log Relative Tolerance** | `10^x` relative tolerance (rtol) for the txt2img pass. |
+| **txt2img Log Absolute Tolerance** | `10^x` absolute tolerance (atol) for the txt2img pass. |
+| **hires.fix Log Relative Tolerance** | `10^x` relative tolerance (rtol) for the Hires.fix pass. |
+| **hires.fix Log Absolute Tolerance** | `10^x` absolute tolerance (atol) for the Hires.fix pass. |
+
+Under **Advanced Settings** (shared across both passes):
+
+| Control | Description |
+|---|---|
+| **Max ODE Steps** | Step count cap for `ae_*` / `se_*` methods. |
+| **Min Sigma** | Lower sigma cutoff. Normally no need to change. |
+| **PID P / I / D Coefficient** | Step-size controller gains for `ae_*` methods only. |
 
 Special values for both method dropdowns:
 
 - **Use same sampler** — Delegates to the sampler selected in the dropdown.
 - **→ TDE Sampler** — Routes to TDE Sampler for that pass.
 
-> **Why split by pass?** Most users can safely leave both at the same tolerance —
-> this is not a control the average workflow needs. It exists because the author
-> personally runs txt2img and Hires.fix with deliberately different methods (e.g.
-> a low-order method at a high step count for txt2img, paired with a different
-> high-order method at a low step count for Hires.fix, sometimes even with a
-> different checkpoint per pass), and wanted matching independent tolerance control
-> to go with it.
-
----
-
-## Methods
-
-### Adaptive Step — `ae_*` (torchode backend)
-
-Step size is determined automatically by the PID controller. The scheduler type and step count are used only for the sigma range; the actual number of ODE evaluations is controlled by rtol / atol. In CUDA environments, integration is performed in float64 for accurate error estimation.
-
-| Method | Algorithm | Order | NFEs/step | Notes |
-|---|---|---|---|---|
-| `ae_bosh3` | Bogacki–Shampine | 3 | 3 | Embedded 2/3 pair. **Recommended.** Efficient and accurate. |
-| `ae_cash_karp5` | Cash–Karp | 5 | 6 | Embedded 4/5 pair. Classic method by Cash and Karp (1990). |
-| `ae_dopri5` | Dormand–Prince | 5 | 6 | The most widely used adaptive ODE solver (≈ scipy RK45). |
-| `ae_dopri8` | Dormand–Prince | 8 | 13 | 8th-order Dormand-Prince. Highest accuracy at highest cost. |
-| `ae_fehlberg2` | Fehlberg | 2 | 3 | Low-order Fehlberg pair. Fast, lower accuracy. |
-| `ae_fehlberg5` | Runge–Kutta–Fehlberg | 5 | 6 | Classic RKF45. Comparable quality to `ae_dopri5`. |
-| `ae_heun_euler2` | Heun–Euler | 2 | 2 | Embedded 1/2 pair. Fastest adaptive method. |
-| `ae_midpoint2` | Explicit Midpoint | 2 | 2 | Explicit midpoint rule. Fast but low accuracy. |
-| `ae_ralston2` | Ralston | 2 | 2 | 2nd-order method with minimized truncation error bound. |
-| `ae_tsit5` | Tsitouras | 5 | 6 | Modern efficient 5th-order (Tsitouras 2011). Comparable to or better than `ae_dopri5`. |
-
-### Fixed Step — `fe_*` (torchode backend)
-
-Step size follows the sigma schedule. Works like standard non-adaptive samplers. Integration runs in float32, matching standard k-diffusion sampler behavior.
-
-| Method | Algorithm | Order | NFEs/step | Notes |
-|---|---|---|---|---|
-| `fe_euler1` | Forward Euler | 1 | 1 | Simplest method. Fastest, lowest accuracy. |
-| `fe_heun3` | Heun (3rd order) | 3 | 3 | Heun's 3rd-order method. |
-| `fe_kutta3` | Runge–Kutta | 3 | 3 | Classical 3rd-order Runge-Kutta. |
-| `fe_kutta4` | Runge–Kutta | 4 | 4 | The classic RK4. Reliable all-rounder. |
-| `fe_kutta_38th4` | Runge–Kutta 3/8-rule | 4 | 4 | RK4 variant using the 3/8-rule. Slightly different error characteristics. |
-| `fe_ralston3` | Ralston | 3 | 3 | Minimized truncation error bound. **Recommended for fixed-step.** |
-| `fe_ralston4` | Ralston | 4 | 4 | 4th-order Ralston's method. |
-| `fe_ssprk3` | SSPRK3 | 3 | 3 | Strong Stability Preserving RK3. Good for high CFG scales. |
-| `fe_wray3` | Wray | 3 | 3 | Low-storage 3rd-order Runge-Kutta (Wray 1986). Memory-efficient. |
-
-### Scipy Adaptive — `se_*` (scipy backend)
-
-Uses `scipy.integrate.solve_ivp`. Processes one sample at a time (not batched). Slower than `ae_*` for batch sizes > 1.
-
-| Method | Algorithm | Order | NFEs/step | Notes |
-|---|---|---|---|---|
-| `se_RK23` | Bogacki–Shampine | 3 | 3 | scipy `RK23`. Embedded 2/3 pair. |
-| `se_RK45` | Dormand–Prince | 5 | 6 | scipy `RK45`. Good accuracy. |
-| `se_DOP853` | Dormand–Prince | 8 | 12 | scipy `DOP853`. Highest accuracy, slowest. |
-
----
-
-## Parameters
-
-Parameters can be set in two places:
-- **Script accordion** — per-generation, overrides Settings tab
-- **Settings → RK Sampler** — global defaults
-
-### Common
-
-| Parameter | Default | Range | Description |
-|---|---|---|---|
-| **Log Relative Tolerance** | −3.0 | −7.0 〜 0.0 | `10^x` rtol for `ae_*` / `se_*`. Smaller = more precise, slower. Must be ≥ the Log Absolute Tolerance. Set independently for txt2img and Hires.fix in the Script accordion. |
-| **Log Absolute Tolerance** | −4.0 | −7.0 〜 0.0 | `10^x` atol for `ae_*` / `se_*`. Smaller = more precise, slower. Must be ≤ the Log Relative Tolerance. Set independently for txt2img and Hires.fix in the Script accordion. |
-| **Max ODE Steps** | 1000 | 10 〜 5000 | Failsafe step count cap for adaptive methods. Has no effect on `fe_*`. Shared across both passes. |
-
-### Advanced
-
-| Parameter | Default | Range | Description |
-|---|---|---|---|
-| **Min Sigma** | 0.00001 | 0.0 〜 0.1 | Sigma below which ODE gradient is treated as zero. Normally unchanged. Shared across both passes. |
-| **PID P** | 0.0 | 0.0 〜 1.0 | Proportional coefficient for adaptive step controller (`ae_*` only). Shared across both passes. |
-| **PID I** | 1.0 | 0.0 〜 2.0 | Integral coefficient. `P=0 / I=1 / D=0` = basic integral controller. Shared across both passes. |
-| **PID D** | 0.0 | 0.0 〜 1.0 | Derivative coefficient (`ae_*` only). Shared across both passes. |
-
----
-
-## Technical Notes
-
-### Float64 / Float32 separation
-
-Adaptive `ae_*` methods run the ODE integration in **float64** on CUDA for accurate step-size error estimation. Fixed `fe_*` methods run in **float32**, matching standard k-diffusion sampler behavior. All model calls (CFG denoiser and pre/post-CFG hooks) always receive **float32** tensors regardless, via an internal dtype-safe wrapper.
-
-### Flow Matching support
-
-Models are automatically detected as Flow Matching (Anima / FLUX / SD3) or DDPM/EDM (SDXL / SD1.5) via `model_wrap.sigmas[-1]` (≤ 1.5 → Flow Matching). Hires.fix applies the correct noise injection formula for each model type:
-
-```
-Flow Matching:  x_t = (1 − t) × x + t × noise    # linear interpolation
-DDPM / EDM:     x_t = x + sigma × noise            # additive
-```
-
-### PNG infotext
-
-The following parameters are embedded in generated PNG metadata:
-
-```
-RK method,
-RK txt2img log_rtol, RK txt2img log_atol,
-RK hires log_rtol, RK hires log_atol,
-RK max_steps, RK min_sigma, RK pid_p, RK pid_i, RK pid_d
-```
-
-> **Known limitation:** `RK method` is a single shared key — when the Hires.fix pass
-> uses a different method than txt2img, the Hires.fix value overwrites it in the
-> saved PNG, so the txt2img method cannot currently be recovered from infotext
-> alone. The tolerance keys above are not affected by this.
-
----
-
-## File Structure
-
-```
-sd-webui-rk-sampler/
-├── scripts/
-│   └── rk_sampler.py       # Sampler registration + Script UI
-└── rk_core/
-    ├── methods/             # ae_* / fe_* method classes (torchode)
-    ├── ode_term.py          # ODE term for torchode
-    ├── scipy_ode_term.py    # ODE term for scipy
-    ├── scipy_step_impl.py   # scipy step implementation
-    ├── solvers/             # AutoDiffAdjoint solver
-    └── controllers/         # PIDController / ScheduledController
-```
-
----
-
-## Compatibility
-
-| Environment | Status |
-|---|---|
-| reForge + SDXL | ✅ Confirmed |
-| reForge + SD1.5 | ✅ Confirmed |
-| Forge Neo + SDXL | ✅ Confirmed |
-| Forge Neo + Anima (Flow Matching) | ✅ Confirmed (including Hires.fix) |
-| A1111 | ❌ Not supported |
+> The tolerance sliders are enabled only while an `ae_*` or `se_*` method is
+> selected. For fixed-step `fe_*` methods, `Use same sampler`, and
+> `→ TDE Sampler`, the sliders are greyed out because rtol / atol are not used.
+> Their values are preserved and reappear when a tolerance-driven method is
+> selected again.
 
 ---
 
@@ -235,20 +97,104 @@ sd-webui-rk-sampler/
 dx/dσ = (x − D(x, σ)) / σ
 ```
 
-`D(x, σ)` is the denoised latent predicted by the model at noise level σ.
+`D(x, σ)` is the denoised latent predicted by the model at noise level σ.  
+The probability-flow ODE is integrated from σ_max down to σ_min.
 
 ---
 
-## License
+## Methods
 
-This project is a port of [memmaptensor/ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler), which is licensed under **GPL-3.0**. As a derivative work, this repository is therefore also distributed under **GPL-3.0**.
+### Adaptive Step (`ae_*`)
 
-- Original: [memmaptensor/ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler) (GPL-3.0)
-- ODE solver backend: [torchode](https://github.com/martenlienen/torchode)
+Step size is determined by a PID controller so that the relative tolerance (rtol)
+and absolute tolerance (atol) targets are met. The scheduler type and step count
+are used only for the sigma range; the actual number of ODE evaluations is
+controlled by the tolerances. In CUDA environments, integration is performed in
+float64 for accurate error estimation.
 
-See the `LICENSE` file for the full text.
+| Method | Algorithm | Order | Notes |
+|---|---|---|---|
+| `ae_dopri5` | Dormand–Prince | 5 | The most widely used adaptive ODE method. Well-balanced general-purpose choice. |
+| `ae_dopri8` | Dormand–Prince | 8 | Higher-order variant. Highest accuracy at highest cost. |
+| `ae_tsit5` | Tsitouras | 5 | Modern 5th-order alternative to Dormand–Prince. |
+| `ae_cash_karp5` | Cash–Karp | 5 | 5th-order variant with a different error estimator. |
+| `ae_fehlberg5` | Fehlberg | 5 | Classical RKF45. |
+| `ae_bosh3` | Bogacki–Shampine | 3 | Lightweight. Efficient when looser tolerances are acceptable. |
+| `ae_fehlberg2` | Fehlberg | 2 | Low order. Fast, but needs tighter tolerances to converge cleanly. |
+| `ae_heun_euler2` | Heun–Euler | 2 | Simplest adaptive pair. Benefits from tighter tolerances. |
+| `ae_midpoint2` | Midpoint | 2 | 2nd-order adaptive variant. |
+| `ae_ralston2` | Ralston | 2 | 2nd-order with reduced truncation error. |
+
+### Fixed Step (`fe_*`)
+
+Fixed-step methods ignore the tolerances and step exactly along the sigma
+schedule, using the WebUI step count directly. Because they have no per-step
+error control, their accuracy depends strongly on the step count. Integration is
+performed in float32 to match standard k-diffusion sampler behaviour.
+
+| Method | Algorithm | Order | Notes |
+|---|---|---|---|
+| `fe_euler1` | Euler | 1 | Simplest method. Fastest per step. |
+| `fe_heun3` | Heun | 3 | Heun's 3rd-order method. |
+| `fe_kutta3` | Kutta | 3 | Kutta's 3rd-order method. |
+| `fe_ralston3` | Ralston | 3 | 3rd-order with reduced truncation error. |
+| `fe_wray3` | van der Houwen / Wray | 3 | 3rd-order variant. |
+| `fe_ssprk3` | Strong Stability Preserving RK | 3 | 3rd-order SSP method. |
+| `fe_kutta4` | Classical Runge–Kutta | 4 | Classical RK4 (weights 1/6, 1/3, 1/3, 1/6). Good quality at moderate step counts. |
+| `fe_kutta_38th4` | Runge–Kutta 3/8-rule | 4 | 4th-order 3/8 variant (weights 1/8, 3/8, 3/8, 1/8). |
+| `fe_ralston4` | Ralston | 4 | 4th-order minimizing truncation error. |
+
+### SciPy (`se_*`)
+
+These methods delegate step-size control to SciPy's own implementation, which
+reads the same rtol / atol values. They process one sample at a time, so batch
+generation is slower than with the `ae_*` methods.
+
+| Method | Order | NFE per step |
+|---|---|---|
+| `se_RK23` | 3 | 3 |
+| `se_RK45` | 5 | 6 |
+| `se_DOP853` | 8 | 12 |
 
 ---
+
+## Settings
+
+Persistent defaults are available under **Settings → RK Sampler**.
+
+| Parameter | Default | Range | Description |
+|---|---|---|---|
+| **Log Relative Tolerance** | −3.0 | −7.0 〜 0.0 | `10^x` rtol for `ae_*` / `se_*` methods. Smaller = more precise, slower. Must be ≥ the Log Absolute Tolerance. |
+| **Log Absolute Tolerance** | −4.0 | −7.0 〜 0.0 | `10^x` atol for `ae_*` / `se_*` methods. Smaller = more precise, slower. Must be ≤ the Log Relative Tolerance. |
+| **Max ODE Steps** | 250 | 1 〜 500 | Failsafe step count cap for `ae_*` / `se_*` methods. Has no effect on `fe_*` methods. |
+| **[Advanced] Min Sigma** | 0.00001 | 0.0 〜 0.1 | Passes with zero gradient below this sigma. Normally no need to change. |
+| **[Advanced] PID P Coefficient** | 0.0 | 0.0 〜 1.0 | Proportional gain of the step-size controller (`ae_*` only). |
+| **[Advanced] PID I Coefficient** | 1.0 | 0.0 〜 2.0 | Integral gain of the step-size controller (`ae_*` only). |
+| **[Advanced] PID D Coefficient** | 0.0 | 0.0 〜 1.0 | Derivative gain of the step-size controller (`ae_*` only). |
+
+> **Note:** Always set the Log Relative Tolerance greater than or equal to the Log Absolute Tolerance.
+
+> **If an adaptive method stops after reaching the step cap:** the tolerances are
+> too strict for the sigma range (this is common in the narrow Hires.fix range).
+> Loosen `log_rtol` / `log_atol`, or raise **Max ODE Steps**.
+
+---
+
+## Reproducibility
+
+The following parameters are embedded in generated PNG metadata:
+
+```
+RK txt2img method, RK txt2img log_rtol, RK txt2img log_atol
+RK hires method,   RK hires log_rtol,   RK hires log_atol
+RK max_steps
+```
+
+`RK method` is also written for the txt2img pass, for backward compatibility with
+images generated before the per-pass keys were introduced.
+
+---
+
 ---
 
 # 日本語
@@ -259,21 +205,21 @@ See the `LICENSE` file for the full text.
 
 [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler)（memmaptensor 作）を reForge 向けに移植。
 
-> reForge 組み込みのサンプラーとは独立したサンプラーとして登録されるため、  
-> txt2img と hires.fix で異なるソルバーを選択できます。
+> reForge 組み込みの ODE Custom とは独立したサンプラーとして登録されるため、  
+> txt2img と hires.fix で異なるメソッドを選択できます。
 
 ---
 
 ## 特徴
 
-- サンプラードロップダウンに **"RK Sampler"** として登録、**22 メソッド**を搭載。
-- Script アコーディオンから **txt2img と Hires.fix に異なるメソッドを設定可能**。
-- **相対/絶対許容誤差も txt2img と Hires.fix で独立に設定可能**。
-- 可変ステップ (`ae_*`) は PID コントローラで刻み幅を自動調整。
-- 固定ステップ (`fe_*`) は通常のサンプラーと同様に sigma スケジュールに従う。
-- scipy 可変ステップ (`se_*`) は `scipy.integrate` をバックエンドとして使用。
-- Hires.fix での **Flow Matching モデル**（Anima / FLUX / SD3 等）の正しいノイズ注入に対応。
-- パラメータ（相対許容誤差 / 絶対許容誤差 / max_steps / PID）は Script UI で生成ごとに上書き可能（Settings タブのデフォルトより優先）。
+- Sampling method ドロップダウンに **22 種類のメソッド**を **「RK Sampler」** として登録。
+- **txt2img と Hires.fix で異なるメソッド**を Script アコーディオンで選択可能。
+- **rtol / atol も txt2img と Hires.fix で個別に設定可能。**
+- 可変ステップ法（`ae_*`）は許容誤差を用いた PID コントローラでステップ幅を自動調整。
+- SciPy メソッド（`se_*`）は SciPy 側の刻み幅制御を使用し、同じ許容誤差を参照。
+- 固定ステップ法（`fe_*`）は sigma スケジュールに沿って刻み、WebUI のステップ数をそのまま使用。
+- 選択中のメソッドが許容誤差を使わない場合（すべての固定ステップ法、`Use same sampler`、`→ TDE Sampler`）、許容誤差スライダーは**自動的にグレーアウト**されます。
+- Max ODE Steps・Min Sigma・PID 係数は **Advanced Settings** に配置され、両パス共通です。
 - 生成パラメータは PNG の infotext に記録され再現性を保持。
 
 ---
@@ -284,17 +230,10 @@ See the `LICENSE` file for the full text.
 pip install torchode
 ```
 
-**scipy** は任意です。`se_*` メソッドを使用する場合のみ必要です。
+WebUI に既に含まれるもの以外、追加パッケージは不要です。
 
-```bash
-pip install scipy
-```
-
-その他のパッケージは、WebUI に同梱のものがそのまま使用されます。  
-GPU サポート: CUDA / MPS / DirectML。
-
-> 本拡張は `set_model_sampler_*_function` を使用しており、これは Forge 系バックエンド
-> 固有のフックです。このフックを持たない A1111（AUTOMATIC1111）では動作しません。
+> 本拡張機能は Forge バックエンドの sampling 関数に依存します。  
+> A1111（AUTOMATIC1111）では使用できません。
 
 ---
 
@@ -303,180 +242,49 @@ GPU サポート: CUDA / MPS / DirectML。
 **Extensions → Install from URL:**
 
 ```
-https://github.com/seti9585/sd-webui-rk-sampler
+https://github.com/seti9585/sd-webui-RK-Sampler
 ```
 
 ---
 
 ## 使い方
 
-### サンプラードロップダウン
+### Sampler ドロップダウン
 
-サンプラードロップダウンから **"RK Sampler"** を選択します。  
-Script アコーディオンが無効、または **"Use same sampler"** が選択されている場合は、
-メインのサンプラードロップダウンで選択されているサンプラーに委譲されます。
+Sampling method ドロップダウンから **「RK Sampler」** を選択します。  
+Script アコーディオンが無効、または **「Use same sampler」** の場合は、メインの
+サンプラードロップダウンで選択中のメソッドに処理を委譲します。
 
 ### Script アコーディオン
 
-Script セクションの **"RK Sampler"** アコーディオンを展開して設定します。
+Script セクションの **「RK Sampler」** アコーディオンを展開して設定します。
 
-| コントロール | 説明 |
+| 項目 | 説明 |
 |---|---|
-| **txt2img Method** | txt2img（および img2img）で使用するメソッド。 |
-| **hires.fix Method** | Hires.fix パスのみで使用するメソッド。 |
-| **txt2img Log Relative Tolerance** | txt2img の `10^x` 相対許容誤差（rtol）。可変ステップメソッド (`ae_*` / `se_*`) で有効。 |
-| **txt2img Log Absolute Tolerance** | txt2img の `10^x` 絶対許容誤差（atol）。 |
-| **hires.fix Log Relative Tolerance** | Hires.fix パスのみの `10^x` 相対許容誤差（rtol）。 |
-| **hires.fix Log Absolute Tolerance** | Hires.fix パスのみの `10^x` 絶対許容誤差（atol）。 |
-| **Max ODE Steps** | 可変ステップメソッドのステップ数上限（両パス共通）。 |
-| **Min Sigma** | これ以下で勾配をゼロとみなす下限（両パス共通）。 |
-| **PID P / I / D** | ステップ幅コントローラの係数（`ae_*` のみ、両パス共通）。 |
+| **txt2img Method** | txt2img（および img2img）で使うメソッド。 |
+| **hires.fix Method** | Hires.fix パスでのみ使うメソッド。 |
+| **txt2img Log Relative Tolerance** | txt2img パスの `10^x` 相対許容誤差（rtol）。 |
+| **txt2img Log Absolute Tolerance** | txt2img パスの `10^x` 絶対許容誤差（atol）。 |
+| **hires.fix Log Relative Tolerance** | Hires.fix パスの `10^x` 相対許容誤差（rtol）。 |
+| **hires.fix Log Absolute Tolerance** | Hires.fix パスの `10^x` 絶対許容誤差（atol）。 |
 
-メソッドドロップダウンの特殊値:
+**Advanced Settings**（両パス共通）：
 
-- **Use same sampler** — サンプラードロップダウンで選択したサンプラーに委譲。
-- **→ TDE Sampler** — そのパスを TDE Sampler にルーティング。
-
-> **なぜパスごとに分けているか:** ほとんどのユーザーは両パスで同じ許容誤差のままで
-> 問題ありません、平均的なワークフローには不要な設定です。これは作者自身が
-> txt2img と Hires.fix で意図的に異なるメソッドを使い分けている（例: txt2img は
-> 低次メソッドを高ステップ数で、Hires.fix は別の高次メソッドを低ステップ数で、
-> 場合によってはパスごとにチェックポイントも切り替える）ため、それに合わせて
-> 許容誤差も独立して制御できるようにと付けた機能です。
-
----
-
-## メソッド一覧
-
-### 可変ステップ — `ae_*`（torchode バックエンド）
-
-刻み幅は PID コントローラが自動決定。スケジューラの種類やステップ数は sigma の範囲にのみ使用され、実際の ODE 評価回数は rtol / atol で制御される。CUDA 環境では精度の高い誤差推定のため float64 で積分を実行。
-
-| メソッド | アルゴリズム | 次数 | NFEs/ステップ | 備考 |
-|---|---|---|---|---|
-| `ae_bosh3` | Bogacki–Shampine | 3 | 3 | 2/3 次埋め込みペア。**推奨**。効率と精度のバランスが優秀。 |
-| `ae_cash_karp5` | Cash–Karp | 5 | 6 | 4/5 次埋め込みペア。Cash と Karp (1990) の古典手法。 |
-| `ae_dopri5` | Dormand–Prince | 5 | 6 | 最も広く使われる可変ステップ ODE ソルバー（≈ scipy RK45）。 |
-| `ae_dopri8` | Dormand–Prince | 8 | 13 | 8 次 Dormand-Prince。最高精度・最高コスト。 |
-| `ae_fehlberg2` | Fehlberg | 2 | 3 | 低次 Fehlberg ペア。高速・低精度。 |
-| `ae_fehlberg5` | Runge–Kutta–Fehlberg | 5 | 6 | 古典的な RKF45。`ae_dopri5` と同等の品質。 |
-| `ae_heun_euler2` | Heun–Euler | 2 | 2 | 1/2 次埋め込みペア。最速の可変ステップメソッド。 |
-| `ae_midpoint2` | Explicit Midpoint | 2 | 2 | 陽的中点法。高速・低精度。 |
-| `ae_ralston2` | Ralston | 2 | 2 | 打ち切り誤差上界を最小化した 2 次法。 |
-| `ae_tsit5` | Tsitouras | 5 | 6 | 現代的な効率的 5 次法（Tsitouras 2011）。`ae_dopri5` と同等以上。 |
-
-### 固定ステップ — `fe_*`（torchode バックエンド）
-
-刻み幅は sigma スケジュールに従う。通常の固定ステップサンプラーと同様の動作。積分は float32 で実行（k-diffusion サンプラーの挙動に準拠）。
-
-| メソッド | アルゴリズム | 次数 | NFEs/ステップ | 備考 |
-|---|---|---|---|---|
-| `fe_euler1` | Forward Euler | 1 | 1 | 最もシンプルな手法。最速・最低精度。 |
-| `fe_heun3` | Heun（3 次） | 3 | 3 | Heun の 3 次法。 |
-| `fe_kutta3` | Runge–Kutta | 3 | 3 | 古典的 3 次 Runge-Kutta。 |
-| `fe_kutta4` | Runge–Kutta | 4 | 4 | 古典的 RK4。信頼性の高い万能手法。 |
-| `fe_kutta_38th4` | Runge–Kutta 3/8-rule | 4 | 4 | 3/8 則を用いた RK4 変形。誤差特性がやや異なる。 |
-| `fe_ralston3` | Ralston | 3 | 3 | 打ち切り誤差上界を最小化。**固定ステップの推奨**。 |
-| `fe_ralston4` | Ralston | 4 | 4 | 4 次 Ralston 法。 |
-| `fe_ssprk3` | SSPRK3 | 3 | 3 | Strong Stability Preserving RK3。高 CFG スケールで安定。 |
-| `fe_wray3` | Wray | 3 | 3 | 低ストレージ 3 次 Runge-Kutta（Wray 1986）。メモリ効率が高い。 |
-
-### scipy 可変ステップ — `se_*`（scipy バックエンド）
-
-`scipy.integrate.solve_ivp` を使用。サンプルを 1 つずつ処理（バッチ並列なし）。バッチサイズ > 1 の場合は `ae_*` より低速。
-
-| メソッド | アルゴリズム | 次数 | NFEs/ステップ | 備考 |
-|---|---|---|---|---|
-| `se_RK23` | Bogacki–Shampine | 3 | 3 | scipy `RK23`。2/3 次埋め込みペア。 |
-| `se_RK45` | Dormand–Prince | 5 | 6 | scipy `RK45`。高精度。 |
-| `se_DOP853` | Dormand–Prince | 8 | 12 | scipy `DOP853`。最高精度・最低速。 |
-
----
-
-## パラメータ
-
-パラメータは 2 箇所で設定できます。
-- **Script アコーディオン** — 生成ごと、Settings タブを上書き
-- **Settings → RK Sampler** — グローバルデフォルト
-
-### 共通
-
-| パラメータ | デフォルト | 範囲 | 説明 |
-|---|---|---|---|
-| **Log Relative Tolerance** | −3.0 | −7.0 〜 0.0 | `ae_*` / `se_*` の `10^x` rtol。小さいほど高精度・低速。Log Absolute Tolerance 以上にする。Script アコーディオンで txt2img と Hires.fix を独立に設定可能。 |
-| **Log Absolute Tolerance** | −4.0 | −7.0 〜 0.0 | `ae_*` / `se_*` の `10^x` atol。小さいほど高精度・低速。Log Relative Tolerance 以下にする。Script アコーディオンで txt2img と Hires.fix を独立に設定可能。 |
-| **Max ODE Steps** | 1000 | 10 〜 5000 | 可変ステップメソッドのステップ数上限（フェイルセーフ）。`fe_*` には影響なし。両パス共通。 |
-
-### 詳細設定
-
-| パラメータ | デフォルト | 範囲 | 説明 |
-|---|---|---|---|
-| **Min Sigma** | 0.00001 | 0.0 〜 0.1 | これ以下の sigma で ODE 勾配をゼロとみなす。通常は変更不要。両パス共通。 |
-| **PID P** | 0.0 | 0.0 〜 1.0 | 可変ステップコントローラの比例係数（`ae_*` のみ）。両パス共通。 |
-| **PID I** | 1.0 | 0.0 〜 2.0 | 積分係数。`P=0 / I=1 / D=0` で基本的な積分コントローラ。両パス共通。 |
-| **PID D** | 0.0 | 0.0 〜 1.0 | 微分係数（`ae_*` のみ）。両パス共通。 |
-
----
-
-## 技術メモ
-
-### Float64 / Float32 の使い分け
-
-可変ステップ `ae_*` メソッドは CUDA 上で誤差推定の精度確保のため **float64** で ODE 積分を実行。固定 `fe_*` メソッドは標準 k-diffusion サンプラーの挙動に合わせ **float32** で実行。CFG デノイザーおよび pre/post-CFG フック等は常に **float32** テンソルを受け取る（内部の dtype-safe ラッパーによる）。
-
-### Flow Matching 対応
-
-モデルは `model_wrap.sigmas[-1]`（≤ 1.5 → Flow Matching）により Flow Matching（Anima / FLUX / SD3）か DDPM/EDM（SDXL / SD1.5）かを自動判別。Hires.fix で各モデルタイプに正しいノイズ注入式を適用する。
-
-```
-Flow Matching:  x_t = (1 − t) × x + t × noise    # 線形補間
-DDPM / EDM:     x_t = x + sigma × noise            # 加算
-```
-
-### PNG infotext
-
-生成 PNG のメタデータに以下のパラメータが記録される。
-
-```
-RK method,
-RK txt2img log_rtol, RK txt2img log_atol,
-RK hires log_rtol, RK hires log_atol,
-RK max_steps, RK min_sigma, RK pid_p, RK pid_i, RK pid_d
-```
-
-> **既知の制限:** `RK method` は単一の共有キーです。Hires.fixパスでtxt2imgと異なる
-> methodを使った場合、保存されるPNGではHires.fixの値で上書きされてしまうため、
-> infotextだけからtxt2img側のmethodを復元することは現状できません。上記の
-> 許容誤差キーはこの影響を受けません。
-
----
-
-## ファイル構成
-
-```
-sd-webui-rk-sampler/
-├── scripts/
-│   └── rk_sampler.py       # サンプラー登録 + Script UI
-└── rk_core/
-    ├── methods/             # ae_* / fe_* メソッドクラス (torchode)
-    ├── ode_term.py          # torchode 用 ODE term
-    ├── scipy_ode_term.py    # scipy 用 ODE term
-    ├── scipy_step_impl.py   # scipy ステップ実装
-    ├── solvers/             # AutoDiffAdjoint ソルバー
-    └── controllers/         # PIDController / ScheduledController
-```
-
----
-
-## 互換性
-
-| 環境 | 状態 |
+| 項目 | 説明 |
 |---|---|
-| reForge + SDXL | ✅ 確認済み |
-| reForge + SD1.5 | ✅ 確認済み |
-| Forge Neo + SDXL | ✅ 確認済み |
-| Forge Neo + Anima (Flow Matching) | ✅ 確認済み（Hires.fix 含む） |
-| A1111 | ❌ 非対応 |
+| **Max ODE Steps** | `ae_*` / `se_*` メソッドのステップ数上限。 |
+| **Min Sigma** | sigma の下限カットオフ。通常は変更不要。 |
+| **PID P / I / D Coefficient** | ステップ幅コントローラのゲイン（`ae_*` のみ有効）。 |
+
+両メソッドドロップダウンの特殊値：
+
+- **Use same sampler** — ドロップダウンで選択中のサンプラーに委譲。
+- **→ TDE Sampler** — そのパスを TDE Sampler に委譲。
+
+> 許容誤差スライダーは `ae_*` または `se_*` メソッドを選択している間だけ有効です。
+> 固定ステップ法（`fe_*`）・`Use same sampler`・`→ TDE Sampler` では rtol / atol が
+> 使われないため、スライダーはグレーアウトされます。値は保持され、許容誤差を使う
+> メソッドを再び選ぶと元の値が復活します。
 
 ---
 
@@ -486,15 +294,106 @@ sd-webui-rk-sampler/
 dx/dσ = (x − D(x, σ)) / σ
 ```
 
-`D(x, σ)` はノイズレベル σ におけるモデルの denoised latent 予測値。
+`D(x, σ)` はノイズレベル σ におけるモデルの denoised latent 予測値。  
+probability flow ODE を σ_max から σ_min へ降順に積分します。
 
 ---
 
-## ライセンス
+## メソッド一覧
 
-本プロジェクトは [memmaptensor/ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler) の移植版です。原作は **GPL-3.0** ライセンスで公開されているため、その派生物である本リポジトリも **GPL-3.0** で配布されます。
+### 可変ステップ法（`ae_*`）
 
-- 原作: [memmaptensor/ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler)（GPL-3.0）
-- ODE ソルバーバックエンド: [torchode](https://github.com/martenlienen/torchode)
+ステップ幅は PID コントローラにより、相対許容誤差（rtol）と絶対許容誤差（atol）の
+目標値を満たすよう決定されます。スケジューラの種類やステップ数は sigma の範囲にのみ
+使用され、実際の ODE 評価回数は許容誤差で制御されます。CUDA 環境では精度の高い誤差
+推定のため float64 で積分を実行します。
 
-全文は `LICENSE` ファイルを参照してください。
+| メソッド | アルゴリズム | 次数 | 特徴 |
+|---|---|---|---|
+| `ae_dopri5` | Dormand–Prince | 5 | 最も広く使われる可変ステップ法。バランスの取れた汎用メソッド。 |
+| `ae_dopri8` | Dormand–Prince | 8 | 高次版。最高精度だが最も低速。 |
+| `ae_tsit5` | Tsitouras | 5 | Dormand–Prince に代わる現代的な 5 次法。 |
+| `ae_cash_karp5` | Cash–Karp | 5 | 誤差推定の異なる 5 次のバリアント。 |
+| `ae_fehlberg5` | Fehlberg | 5 | 古典的な RKF45。 |
+| `ae_bosh3` | Bogacki–Shampine | 3 | 軽量。許容誤差を緩めても許容できる場面で効率的。 |
+| `ae_fehlberg2` | Fehlberg | 2 | 低次。高速だが、きれいに収束させるには許容誤差を厳しめにする必要がある。 |
+| `ae_heun_euler2` | Heun–Euler | 2 | 最もシンプルな可変ステップ対。許容誤差を厳しめにすると安定する。 |
+| `ae_midpoint2` | Midpoint | 2 | 2 次の可変ステップ版。 |
+| `ae_ralston2` | Ralston | 2 | 打ち切り誤差を抑えた 2 次法。 |
+
+### 固定ステップ法（`fe_*`）
+
+固定ステップ法は許容誤差を無視し、sigma スケジュールに沿って正確に刻みます。WebUI の
+ステップ数をそのまま使用します。1 ステップごとの誤差制御を持たないため、精度はステップ
+数への依存度が高くなります。標準の k-diffusion サンプラーと挙動を揃えるため float32 で
+積分します。
+
+| メソッド | アルゴリズム | 次数 | 特徴 |
+|---|---|---|---|
+| `fe_euler1` | Euler | 1 | 最もシンプル。1 ステップあたりが最速。 |
+| `fe_heun3` | Heun | 3 | Heun の 3 次法。 |
+| `fe_kutta3` | Kutta | 3 | Kutta の 3 次法。 |
+| `fe_ralston3` | Ralston | 3 | 打ち切り誤差を抑えた 3 次法。 |
+| `fe_wray3` | van der Houwen / Wray | 3 | 3 次のバリアント。 |
+| `fe_ssprk3` | Strong Stability Preserving RK | 3 | 3 次の SSP 法。 |
+| `fe_kutta4` | 古典的 Runge–Kutta | 4 | 古典的 RK4（重み 1/6, 1/3, 1/3, 1/6）。中程度のステップ数で高品質。 |
+| `fe_kutta_38th4` | Runge–Kutta 3/8 則 | 4 | 4 次の 3/8 則バリアント（重み 1/8, 3/8, 3/8, 1/8）。 |
+| `fe_ralston4` | Ralston | 4 | 打ち切り誤差を最小化する 4 次法。 |
+
+### SciPy メソッド（`se_*`）
+
+刻み幅の制御を SciPy 側の実装に委ねるメソッドです。参照する rtol / atol は同じもの
+です。サンプルを 1 枚ずつ処理するため、バッチ生成では `ae_*` より低速になります。
+
+| メソッド | 次数 | 1 ステップあたりの評価回数 |
+|---|---|---|
+| `se_RK23` | 3 | 3 |
+| `se_RK45` | 5 | 6 |
+| `se_DOP853` | 8 | 12 |
+
+---
+
+## Settings
+
+**Settings → RK Sampler** でデフォルト値を永続的に設定できます。
+
+| パラメータ | デフォルト | 範囲 | 説明 |
+|---|---|---|---|
+| **Log Relative Tolerance** | −3.0 | −7.0 〜 0.0 | `ae_*` / `se_*` メソッドの `10^x` rtol。小さいほど高精度・低速。Log Absolute Tolerance 以上にする。 |
+| **Log Absolute Tolerance** | −4.0 | −7.0 〜 0.0 | `ae_*` / `se_*` メソッドの `10^x` atol。小さいほど高精度・低速。Log Relative Tolerance 以下にする。 |
+| **Max ODE Steps** | 250 | 1 〜 500 | `ae_*` / `se_*` メソッドのステップ数上限（フェイルセーフ）。`fe_*` には影響しない。 |
+| **[Advanced] Min Sigma** | 0.00001 | 0.0 〜 0.1 | この sigma を下回る領域では勾配ゼロとして通過。通常は変更不要。 |
+| **[Advanced] PID P Coefficient** | 0.0 | 0.0 〜 1.0 | ステップ幅コントローラの比例ゲイン（`ae_*` のみ）。 |
+| **[Advanced] PID I Coefficient** | 1.0 | 0.0 〜 2.0 | ステップ幅コントローラの積分ゲイン（`ae_*` のみ）。 |
+| **[Advanced] PID D Coefficient** | 0.0 | 0.0 〜 1.0 | ステップ幅コントローラの微分ゲイン（`ae_*` のみ）。 |
+
+> **注意：** Log Relative Tolerance は必ず Log Absolute Tolerance 以上にして下さい。
+
+> **可変ステップ法がステップ数上限で停止した場合：** 許容誤差が sigma の範囲に対して
+> 厳しすぎます（狭い Hires.fix の範囲で起こりやすい）。`log_rtol` / `log_atol` を緩めるか、
+> **Max ODE Steps** を上げて下さい。
+
+---
+
+## 再現性
+
+生成された PNG のメタデータには以下のパラメータが記録されます。
+
+```
+RK txt2img method, RK txt2img log_rtol, RK txt2img log_atol
+RK hires method,   RK hires log_rtol,   RK hires log_atol
+RK max_steps
+```
+
+per-pass キー導入前に生成された画像との互換のため、txt2img パスでは `RK method`
+も併せて記録されます。
+
+---
+
+## License
+
+MIT License — Original port: [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler) © memmaptensor
+
+Adaptive and fixed-step integration is provided by [torchode](https://github.com/martenlienen/torchode) © Marten Lienen.
+
+The fixed-step Runge–Kutta tableaux (`fe_kutta4`, `fe_kutta_38th4`, `fe_ralston3`, `fe_ralston4`, `fe_wray3`, `fe_ssprk3`) are also available in [sd-webui-TDE-Sampler](https://github.com/seti9585/sd-webui-TDE-Sampler), so each has a torchdiffeq-path counterpart there.
