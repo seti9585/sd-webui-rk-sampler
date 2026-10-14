@@ -2,13 +2,17 @@
 
 **EN** | [日本語](#日本語)
 
-ODE sampler extension for Stable Diffusion WebUI (reForge / Forge Neo),  
-powered by [torchode](https://github.com/martenlienen/torchode).
+RK Sampler is a sampler extension for Stable Diffusion WebUI (reForge / Forge Neo) that uses numerical methods for solving **ODEs (ordinary differential equations)** to generate images. Its ODE integration is powered by [torchode](https://github.com/martenlienen/torchode).
+
+It is designed to use ODE methods in **both txt2img and Hires.fix**, with a separate method choice for each pass, and to work alongside other samplers.
+
+- **Fixed-step methods use the WebUI step count.** Adjust the step count for each pass to control how finely it is calculated. Adaptive-step methods instead adjust their step size according to the relative and absolute tolerances.
+- **Use different ODE methods for txt2img and Hires.fix.** Just as you can choose different samplers for the two passes, you can choose a different RK Sampler method for each.
+- **Use RK Sampler for only one pass, or combine RK and TDE.** You can pair RK Sampler in txt2img with another sampler in Hires.fix, or the other way around. The `→ TDE Sampler` option also lets RK Sampler and TDE Sampler hand a pass to each other when both extensions are installed.
 
 Port of [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler) by memmaptensor.
 
-> In reForge, this extension registers as an independent sampler, separate from the built-in ODE Custom,  
-> allowing different methods to be selected for txt2img and hires.fix separately.
+> In reForge, this extension registers as an independent sampler, separate from the built-in ODE Custom.
 
 ---
 
@@ -208,12 +212,17 @@ images generated before the per-pass keys were introduced.
 
 **[English](#sd-webui-rk-sampler)** | 日本語
 
-[torchode](https://github.com/martenlienen/torchode) を使った ODE サンプラー拡張機能（reForge / Forge Neo 向け）。
+RK Sampler は、**ODE（常微分方程式）の数値解法を利用して画像を生成する**、reForge / Forge Neo 向けのサンプラー拡張機能です。ODE の計算には [torchode](https://github.com/martenlienen/torchode) を使用します。
+
+**txt2img と Hires.fix の両方で ODE の解法を使え、それぞれの解法を個別に選べること**、そして**他のサンプラーと組み合わせて使えること**を意図した設計です。
+
+- **固定ステップ法は、WebUI のステップ数で計算の細かさを決めます。** txt2img と Hires.fix それぞれのステップ数で調整できます。可変ステップ法は、相対・絶対許容誤差に応じてステップ幅を自動調整します。
+- **txt2img と Hires.fix で、異なる ODE の解法を選べます。** 両段階でサンプラーを使い分けるのと同じように、RK Sampler のメソッドも個別に設定できます。
+- **片方だけ RK Sampler を使うことも、RK と TDE を連携させることもできます。** txt2img は RK Sampler、Hires.fix は別のサンプラー、という組み合わせや、その逆も可能です。両拡張機能を導入していれば、`→ TDE Sampler` でその段階の処理をもう一方に渡すこともできます。
 
 [ComfyUI-RK-Sampler](https://github.com/memmaptensor/ComfyUI-RK-Sampler)（memmaptensor 作）を Forge 系 WebUI 向けに移植。
 
-> reForge では、組み込みの ODE Custom とは独立したサンプラーとして登録されるため、  
-> txt2img と hires.fix で異なるメソッドを選択できます。
+> reForge では、組み込みの ODE Custom とは独立したサンプラーとして登録されます。
 
 ---
 
